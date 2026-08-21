@@ -88,6 +88,26 @@ def test_registrar_optin_raises_cerc_api_error_on_4xx():
     assert exc.value.status_code == 422
     assert exc.value.body == {"codigo": "104804", "mensagem": "duplicado"}
 
+    logged = get_db().table("cerc_requisicao").select("*").eq("correlacao_id", "corr-1").execute()
+    assert len(logged.data) == 1
+    assert logged.data[0]["http_status"] == 422
+
+
+@respx.mock
+def test_registrar_optin_logs_before_raising_on_transport_failure():
+    _mock_token()
+    respx.post("https://ap-homolog.cerc.inf.br/opt_in").mock(
+        side_effect=httpx.ConnectError("connection refused")
+    )
+
+    with pytest.raises(httpx.ConnectError):
+        client.registrar_optin({"cnpjFinanciador": "12345678000199"}, correlacao_id="corr-1")
+
+    logged = get_db().table("cerc_requisicao").select("*").eq("correlacao_id", "corr-1").execute()
+    assert len(logged.data) == 1
+    assert logged.data[0]["http_status"] is None
+    assert logged.data[0]["tentativa"] == 1
+
 
 @respx.mock
 def test_atualizar_optin_calls_expected_path():

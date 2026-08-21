@@ -58,13 +58,21 @@ def _send(method: str, path: str, payload: dict, correlacao_id: str, token: str)
 
 def _request(method: str, path: str, payload: dict, correlacao_id: str) -> dict:
     token = get_cerc_token()
-    response = _send(method, path, payload, correlacao_id, token)
+    try:
+        response = _send(method, path, payload, correlacao_id, token)
+    except httpx.HTTPError:
+        _log_attempt(path, correlacao_id, payload, None, tentativa=1)
+        raise
     _log_attempt(path, correlacao_id, payload, response, tentativa=1)
 
     if response.status_code == 401:
         invalidate_token()
         token = get_cerc_token()
-        response = _send(method, path, payload, correlacao_id, token)
+        try:
+            response = _send(method, path, payload, correlacao_id, token)
+        except httpx.HTTPError:
+            _log_attempt(path, correlacao_id, payload, None, tentativa=2)
+            raise
         _log_attempt(path, correlacao_id, payload, response, tentativa=2)
 
     if response.status_code >= 400:
