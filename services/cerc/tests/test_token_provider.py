@@ -43,11 +43,12 @@ def test_get_cerc_token_refetches_after_80_percent_expiry():
     route = respx.post("https://api.int.cerc.com/oauth/token").mock(
         return_value=httpx.Response(200, json={"access_token": "tok-2", "expires_in": 3600})
     )
+    calls_before = route.call_count
     token_provider._cache["expires_at"] = 0.0  # simulate 80%-of-expires_in elapsed
 
     token = token_provider.get_cerc_token()
     assert token == "tok-2"
-    assert route.call_count == 1
+    assert route.call_count == calls_before + 1
 
 
 @respx.mock
@@ -83,5 +84,6 @@ def test_invalidate_token_forces_refetch():
     route = respx.post("https://api.int.cerc.com/oauth/token").mock(
         return_value=httpx.Response(200, json={"access_token": "tok-2", "expires_in": 3600})
     )
+    calls_before = route.call_count
     assert token_provider.get_cerc_token() == "tok-2"
-    assert route.call_count == 1
+    assert route.call_count == calls_before + 1
