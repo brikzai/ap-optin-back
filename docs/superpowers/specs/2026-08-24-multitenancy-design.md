@@ -96,7 +96,11 @@ Ordem: `shared/tenant_config.py` → `shared/cloudsql_client.py` (retrofit) → 
 - Testes de multi-tenancy de verdade (dois tenants isolados) usam **configs fake** (`monkeypatch.setenv` com dois `TENANT_{cnpj}_CONFIG` diferentes apontando pro **mesmo** Cloud SQL de dev mas com `cloudsql_db_name`/schema diferentes, ou simplesmente dois `financiador_id` diferentes cacheados em processo com configs mockadas) — não provisiona uma segunda instância Cloud SQL real só para teste.
 - Suite existente (28 testes de Plans 01-07 + 7 de Task 1) precisa ser adaptada: todo `get_db()` sem argumento e toda chamada a `client.registrar_optin(payload, correlacao_id=...)` sem `financiador_id` para de compilar — isso é esperado e faz parte do Plan 09, não um efeito colateral a evitar.
 
-## 9. Riscos e pendências
+## 9. Contrato com o futuro front de gestão de tenants
+
+O provisionamento de tenants (criar instância Cloud SQL, rodar `docker/initdb/*.sql`, gravar o segredo) será gerenciado por um front apartado, fora deste repositório. Este documento define o **contrato** que esse front precisa seguir para este serviço enxergar um tenant: nome do segredo (`TENANT_{cnpj}_CONFIG`, §3) e o formato JSON (§3). Não existe hoje nenhum formato pré-existente do lado de lá — este é o formato de referência. Se esse front vier a ser construído antes deste serviço, qualquer mudança de formato exige atualizar `shared/tenant_config.py` e este documento juntos.
+
+## 10. Riscos e pendências
 
 - Rotação de segredo (`client_secret`, senha do banco) de um tenant não invalida o cache em memória do processo — precisa de restart. Aceito por ora; um mecanismo de invalidação por evento é trabalho futuro se isso incomodar operacionalmente.
 - Nenhuma automação de onboarding de tenant (criar instância Cloud SQL, rodar `docker/initdb/*.sql`, gravar o segredo) — processo manual/scriptado fora do código da aplicação. Se o número de tenants crescer muito além de "dezenas", isso vira um projeto próprio.
