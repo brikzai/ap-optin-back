@@ -46,6 +46,7 @@ def _reset_state():
     db.table("cerc_requisicao").delete().eq("correlacao_id", "corr-1").execute()
     yield
     db.table("cerc_requisicao").delete().eq("correlacao_id", "corr-1").execute()
+    tenant_config_module._cache.clear()
 
 
 @respx.mock
