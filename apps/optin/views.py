@@ -16,7 +16,7 @@ from apps.optin.validation import (
     validar_evidencia,
     validar_vigencia,
 )
-from services.cerc.client import CercApiError, registrar_optin
+from services.cerc.client import CercApiError, atualizar_optin as atualizar_optin_cerc, encerrar_optin, registrar_optin
 from shared.jwt_auth import jwt_required
 from shared.tenant_config import get_tenant_config
 
@@ -162,9 +162,91 @@ def detalhar_optin(request, optin_id):
     return JsonResponse(_serializar_optin(optin))
 
 
+CAMPOS_NAO_ATUALIZAVEIS = {"referenciaExterna", "cnpjSolicitante"}
+
+
+@jwt_required
+@idempotente("optin_update")
+def atualizar_optin_view(request, optin_id):
+    optin = repository.buscar_por_id(request.financiador_id, optin_id)
+    if optin is None:
+        return _erro_json("OPTIN_NAO_ENCONTRADO", "opt-in não encontrado", 404)
+
+    if optin["status"] != "ATIVO":
+        return _erro_json("OPTIN_NAO_ATIVO", "só é possível atualizar opt-in ATIVO", 409)
+
+    try:
+        payload = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return _erro_json("JSON_INVALIDO", "corpo da requisição não é JSON válido", 400)
+
+    campos_proibidos = CAMPOS_NAO_ATUALIZAVEIS & payload.keys()
+    if campos_proibidos:
+        return _erro_json("CAMPO_NAO_ATUALIZAVEL", f"campos não atualizáveis: {sorted(campos_proibidos)}", 422)
+
+    if not optin.get("protocolo_cerc"):
+        return _erro_json("PROTOCOLO_AUSENTE", "opt-in sem protocolo_cerc não pode ser atualizado", 422)
+
+    credenciadoras = optin["credenciadoras"]
+    arranjos = optin["arranjos"]
+    vigencia_inicio = optin["vigencia_inicio"]
+    vigencia_fim = payload.get("vigenciaFim")
+
+    try:
+        if vigencia_fim:
+            vigencia_fim = datetime.date.fromisoformat(vigencia_fim)
+            validar_vigencia(optin["data_assinatura"], vigencia_inicio, vigencia_fim)
+        else:
+            vigencia_fim = optin["vigencia_fim"]
+        if "arranjos" in payload:
+            arranjos = payload["arranjos"]
+            validar_arranjos(arranjos, repository.arranjos_ativos(request.financiador_id))
+        if "credenciadoras" in payload:
+            credenciadoras = payload["credenciadoras"]
+            validar_credenciadoras(credenciadoras)
+    except ValidationError as exc:
+        return _erro_json(exc.codigo, exc.mensagem, 422)
+
+    payload_cerc = {
+        "referenciaExterna": optin["referencia_externa"],
+        "cnpjSolicitante": get_tenant_config(request.financiador_id)["cerc_cnpj_solicitante"],
+        "cnpjFinanciador": payload.get("cnpjFinanciador", optin["cnpj_financiador"]),
+        "dataAssinaturaOptIn": str(optin["data_assinatura"]),
+        "carteira": payload.get("carteira", optin.get("carteira")),
+        "definicaoUnidadeRecebivel": {
+            "listaCnpjCredenciadora": credenciadoras,
+            "listaCodigoArranjoPagamento": arranjos,
+            "documentoUsuarioFinalRecebedor": optin["documento_ufr"],
+            "documentoTitular": optin["documento_titular"],
+            "dataInicio": str(vigencia_inicio),
+            "dataFim": str(vigencia_fim),
+        },
+    }
+
+    try:
+        resposta = atualizar_optin_cerc(request.financiador_id, optin["protocolo_cerc"], payload_cerc, correlacao_id=optin["referencia_externa"])
+    except Exception as exc:  # noqa: BLE001 - mesmo tratamento uniforme de Task 7
+        logger.warning("falha ao atualizar optin %s na CERC: %s", optin["referencia_externa"], exc)
+        return _erro_json("CERC_INDISPONIVEL", "falha ao atualizar opt-in na CERC", 502)
+
+    item = correlacionar_por_referencia(resposta, optin["referencia_externa"])
+    resultado = interpretar_item_opt_in(item)
+
+    if resultado.status_local != "ATIVO":
+        return _erro_json(resultado.erro_codigo or "REJEITADO", resultado.erro_mensagem or "atualização rejeitada pela CERC", 422)
+
+    optin_final = repository.atualizar_campos(request.financiador_id, optin_id, {
+        "vigencia_fim": vigencia_fim,
+        "carteira": payload.get("carteira", optin.get("carteira")),
+    })
+    return JsonResponse(_serializar_optin(optin_final))
+
+
 def optin_detail(request, optin_id):
     if request.method == "GET":
         return detalhar_optin(request, optin_id)
+    if request.method == "PATCH":
+        return atualizar_optin_view(request, optin_id)
     return JsonResponse({"erro": "METODO_NAO_PERMITIDO"}, status=405)
 
 
