@@ -4,9 +4,15 @@ Chave pública RS256 fixa (IAM_JWT_PUBLIC_KEY) e emissor esperado
 (IAM_JWT_ISSUER) — sem JWKS/rede, mesmo padrão de shared/secrets.py para
 segredos estáticos. Rotas isentas (health, push do Pub/Sub) simplesmente
 não usam @jwt_required — não há middleware global com exceção por path.
+
+Multi-tenancy: exige o claim `financiador_id` (CNPJ, 14 dígitos) em todo
+JWT válido e o expõe em `request.financiador_id`, além de
+`request.jwt_claims`. Ver
+docs/superpowers/specs/2026-08-24-multitenancy-design.md §2.
 """
 import functools
 import os
+import re
 
 import jwt
 from django.http import JsonResponse
@@ -48,9 +54,18 @@ def jwt_required(view_func):
     @functools.wraps(view_func)
     def wrapper(request, *args, **kwargs):
         try:
-            request.jwt_claims = validar_bearer_token(request.headers.get("Authorization", ""))
+            claims = validar_bearer_token(request.headers.get("Authorization", ""))
         except JwtAuthError as exc:
             return JsonResponse({"erro": "NAO_AUTENTICADO", "mensagem": exc.mensagem}, status=401)
+
+        financiador_id = claims.get("financiador_id")
+        if not financiador_id or not re.fullmatch(r"\d{14}", str(financiador_id)):
+            return JsonResponse(
+                {"erro": "NAO_AUTENTICADO", "mensagem": "claim financiador_id ausente ou inválido"}, status=401
+            )
+
+        request.jwt_claims = claims
+        request.financiador_id = financiador_id
         return view_func(request, *args, **kwargs)
 
     return wrapper

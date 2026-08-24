@@ -32,7 +32,12 @@ def _set_env(monkeypatch, keypair):
 
 
 def _token(private_pem, **overrides):
-    payload = {"exp": int(time.time()) + 300, "iss": "brikz-iam", "sub": "user-1"}
+    payload = {
+        "exp": int(time.time()) + 300,
+        "iss": "brikz-iam",
+        "sub": "user-1",
+        "financiador_id": "12345678000199",
+    }
     payload.update(overrides)
     return pyjwt.encode(payload, private_pem, algorithm="RS256")
 
@@ -90,7 +95,7 @@ def test_jwt_required_retorna_401_sem_header():
     assert response.status_code == 401
 
 
-def test_jwt_required_chama_view_com_claims_quando_valido(keypair):
+def test_jwt_required_popula_claims_e_financiador_id_quando_valido(keypair):
     from shared.jwt_auth import jwt_required
 
     private_pem, _ = keypair
@@ -98,9 +103,41 @@ def test_jwt_required_chama_view_com_claims_quando_valido(keypair):
 
     @jwt_required
     def view(request):
-        return JsonResponse({"sub": request.jwt_claims["sub"]})
+        return JsonResponse({"sub": request.jwt_claims["sub"], "financiador_id": request.financiador_id})
 
     request = RequestFactory().get("/api/v1/optins", HTTP_AUTHORIZATION=f"Bearer {token}")
     response = view(request)
     assert response.status_code == 200
-    assert json.loads(response.content) == {"sub": "user-1"}
+    assert json.loads(response.content) == {"sub": "user-1", "financiador_id": "12345678000199"}
+
+
+def test_jwt_required_retorna_401_sem_claim_financiador_id(keypair):
+    from shared.jwt_auth import jwt_required
+
+    private_pem, _ = keypair
+    token = pyjwt.encode(
+        {"exp": int(time.time()) + 300, "iss": "brikz-iam", "sub": "user-1"}, private_pem, algorithm="RS256"
+    )
+
+    @jwt_required
+    def view(request):
+        return JsonResponse({"ok": True})
+
+    request = RequestFactory().get("/api/v1/optins", HTTP_AUTHORIZATION=f"Bearer {token}")
+    response = view(request)
+    assert response.status_code == 401
+
+
+def test_jwt_required_retorna_401_com_financiador_id_mal_formatado(keypair):
+    from shared.jwt_auth import jwt_required
+
+    private_pem, _ = keypair
+    token = _token(private_pem, financiador_id="abc123")
+
+    @jwt_required
+    def view(request):
+        return JsonResponse({"ok": True})
+
+    request = RequestFactory().get("/api/v1/optins", HTTP_AUTHORIZATION=f"Bearer {token}")
+    response = view(request)
+    assert response.status_code == 401
