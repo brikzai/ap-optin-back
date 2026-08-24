@@ -140,7 +140,37 @@ def criar_optin(request):
     return _erro_json(resultado.erro_codigo or "REJEITADO", resultado.erro_mensagem or "opt-in rejeitado pela CERC", 422)
 
 
+@jwt_required
+def listar_optins(request):
+    filtros = {
+        "status": request.GET.get("status"),
+        "documento_ufr": request.GET.get("usuarioFinalRecebedor"),
+        "origem": request.GET.get("origem"),
+        "carteira": request.GET.get("carteira"),
+        "vigente_em": request.GET.get("vigenteEm"),
+    }
+    limit = min(int(request.GET.get("limit", 50)), 200)
+    resultado = repository.listar(request.financiador_id, filtros, limit)
+    return JsonResponse({"dados": [_serializar_optin(o) for o in resultado]})
+
+
+@jwt_required
+def detalhar_optin(request, optin_id):
+    optin = repository.buscar_por_id(request.financiador_id, optin_id)
+    if optin is None:
+        return _erro_json("OPTIN_NAO_ENCONTRADO", "opt-in não encontrado", 404)
+    return JsonResponse(_serializar_optin(optin))
+
+
+def optin_detail(request, optin_id):
+    if request.method == "GET":
+        return detalhar_optin(request, optin_id)
+    return JsonResponse({"erro": "METODO_NAO_PERMITIDO"}, status=405)
+
+
 def optins_collection(request):
     if request.method == "POST":
         return criar_optin(request)
+    if request.method == "GET":
+        return listar_optins(request)
     return JsonResponse({"erro": "METODO_NAO_PERMITIDO"}, status=405)
