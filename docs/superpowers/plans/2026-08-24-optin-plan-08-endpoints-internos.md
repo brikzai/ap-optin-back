@@ -4,7 +4,7 @@
 
 **Goal:** Implementar a API interna `/api/v1/optins` (SPEC-01 §5) sobre as fundações dos planos 01-07: `POST /api/v1/optins` (criar), `GET /api/v1/optins` (listar), `GET /api/v1/optins/{id}` (detalhar), `PATCH /api/v1/optins/{id}` (atualizar), `POST /api/v1/optins/{id}/optout` (encerrar) — com autenticação JWT do IdP corporativo, `Idempotency-Key`, anti-duplicidade (§5.6) e a máquina de estados §9.1 fechando o ciclo PENDENTE→ATIVO/REJEITADO e ATIVO→ENCERRADO.
 
-**Architecture:** Function-based views em `apps/optin/views.py` (sem DRF ViewSets, decisão já tomada no design doc), autenticadas por um decorator JWT (`shared/jwt_auth.py`) e um decorator de idempotência (`apps/optin/idempotency.py`). Toda regra de negócio local fica em `apps/optin/validation.py` (funções puras, testáveis sem banco); toda leitura/escrita passa por `apps/optin/repository.py`, que usa `shared.cloudsql_client.get_db()` (sem ORM). A interpretação do array 207 da CERC (sucesso/erro por item, correlação por `referenciaExterna`, casos idempotentes como `104803`/`106803`) fica isolada em `apps/optin/cerc_mapping.py`, reaproveitada por create/update/optout. As chamadas à CERC em si usam `services/cerc/client.py` (Plan 07, já corrigido para `POST /opt_in` com `tipoOperacao`/array — ver nota abaixo).
+**Architecture:** Function-based views em `apps/optin/views.py` (sem DRF ViewSets, decisão já tomada no design doc), autenticadas por um decorator JWT (`shared/jwt_auth.py`) e um decorator de idempotência (`apps/optin/idempotency.py`). Toda regra de negócio local fica em `apps/optin/validation.py` (funções puras, testáveis sem banco); toda leitura/escrita passa por `apps/optin/repository.py`, que usa `shared.cloudsql_client.get_db(financiador_id)` (sem ORM, um banco por tenant — Plan 09). A interpretação do array 207 da CERC (sucesso/erro por item, correlação por `referenciaExterna`, casos idempotentes como `104803`/`106803`) fica isolada em `apps/optin/cerc_mapping.py`, reaproveitada por create/update/optout. As chamadas à CERC em si usam `services/cerc/client.py` (Plan 07, já corrigido para `POST /opt_in` com `tipoOperacao`/array — ver nota abaixo).
 
 **Tech Stack:** Django 4.2 (function-based views), PyJWT (`pyjwt[crypto]`) para verificação RS256, SQLAlchemy via `shared/cloudsql_client.py`, `python-ulid` para IDs, pytest + pytest-django + `django.test.Client`.
 
@@ -17,6 +17,7 @@
 ## Global Constraints
 
 - Todos os endpoints de `/api/v1/*` exigem `Authorization: Bearer <JWT RS256>` do IdP corporativo, exceto `health` (SPEC-01 §5, design §4). Chave pública fixa via `IAM_JWT_PUBLIC_KEY` (PEM), emissor esperado via `IAM_JWT_ISSUER` (já presentes em `.env`/`.env.example`, sem verificação via JWKS/rede).
+- `financiador_id` (tenant/CNPJ do financiador) vem de `request.financiador_id`, populado por `jwt_required` a partir do claim JWT (Plan 09) — todo código que acessa banco (`repository.py`) ou chama a CERC (`services/cerc/client.py`) recebe `financiador_id` como argumento explícito, nunca lê `os.environ` para isso. `CERC_CNPJ_SOLICITANTE`/`CERC_CNPJ_FINANCIADOR` **não existem mais** como env vars — vieram do design de multi-tenancy (Plan 09): `cnpjFinanciador` é o próprio `financiador_id`; `cnpjSolicitante` vem de `shared.tenant_config.get_tenant_config(financiador_id)["cerc_cnpj_solicitante"]`.
 - `Idempotency-Key` é obrigatório em todo `POST` mutante (`POST /optins`, `POST /optins/{id}/optout`) — SPEC-01 §5. Ausência é erro local `VAL011` (código introduzido por este plano; não existe no catálogo CERC §7, que cobre só o payload `/opt_in`/`/opt_out`).
 - Documentos (CNPJ/CPF) são sempre normalizados (`validation.normalizar_documento`) antes de persistir ou logar; logs usam `validation.mascarar_documento` (§8) — nunca documento íntegro em log.
 - `referenciaExterna` é gerada pelo serviço, imutável, única (`OPTIN-{YYYY}-{seq:09d}` / `OPTOUT-{YYYY}-{seq:09d}` — SPEC-01 §4.1), via sequência Postgres dedicada.
@@ -24,7 +25,7 @@
 
 ## Riscos e pendências desta implementação
 
-- **SPEC-01 §5.1 não lista `cnpjSolicitante`/`cnpjFinanciador`** no corpo de `POST /api/v1/optins`, mas ambos são `NOT NULL` no schema (§6) e obrigatórios no payload CERC (§4.1). Resolução adotada: tratados como configuração fixa do ambiente (`CERC_CNPJ_SOLICITANTE`/`CERC_CNPJ_FINANCIADOR` em `.env`), não como campos do request — consistente com o fato de este serviço já usar uma única credencial CERC por ambiente (um financiador por deploy). **Confirmar com negócio se algum dia há múltiplos financiadores no mesmo deploy** — se sim, isso vira campo de request.
+- **RESOLVIDO pelo Plan 09:** `cnpjSolicitante`/`cnpjFinanciador` (ausentes do corpo de `POST /api/v1/optins` na SPEC-01 §5.1, mas obrigatórios no schema §6 e no payload CERC §4.1) vêm de `request.financiador_id` (= `cnpjFinanciador`) e `get_tenant_config(financiador_id)["cerc_cnpj_solicitante"]` (= `cnpjSolicitante`) — não mais de env vars fixas. Ver `docs/superpowers/specs/2026-08-24-multitenancy-design.md`.
 - **Conflito entre SPEC-01 §5.1 (exemplo de resposta mostra `"status": "PENDENTE", "protocoloCerc": null` no `201`) e §11.2 IT-01 (`201`, status `ATIVO`, `protocolo_cerc` persistido).** Resolvido a favor do critério de aceite testável (IT-01): `POST /api/v1/optins` grava `PENDENTE`, chama a CERC **sincronamente** (lote de 1 item) e responde com o estado final (`ATIVO`/`REJEITADO`). `PENDENTE` continua existindo como estado real e transitório no banco (visível em `GET` se a chamada travar antes de resolver), mas o exemplo de `201`/`protocoloCerc: null` da SPEC-01 é tratado como ilustrativo, não como contrato literal.
 - Envio assíncrono/em lote (>1 item por chamada `/opt_in`) fica fora deste plano — cada `POST /api/v1/optins` envia lote de 1. Reenvio de `PENDENTE`/`FALHA_ENVIO` travados é o job `retry_envio` (SPEC-01 §9.4), plano futuro (item 6 da ordem sugerida em §0).
 - Classificação completa retentável/não-retentável por código CERC (§9.2) não é replicada aqui: qualquer erro de transporte ou HTTP fora do 207 em create/update/optout vira `FALHA_ENVIO` local + `502` ao chamador — a granularidade fina de retry é responsabilidade do job de reconciliação (§9.4, fora de escopo).
@@ -37,6 +38,8 @@
 ---
 
 ### Task 1: Autenticação JWT do IdP corporativo
+
+> **Status: já concluída e superada.** `shared/jwt_auth.py` foi implementado (commit `37169f3`) e depois ampliado pelo Plan 09 (Task 5, commit `bb24a23`) para exigir o claim `financiador_id` e popular `request.financiador_id` — exatamente o que as Tasks 3/6/7/8/9/10 abaixo agora dependem. Nenhum trabalho novo necessário aqui; os Steps abaixo ficam como registro histórico do que já foi entregue.
 
 **Files:**
 - Create: `optin/shared/jwt_auth.py`
@@ -269,9 +272,11 @@ import sqlalchemy
 
 from shared.cloudsql_client import get_db
 
+FINANCIADOR_TESTE = "12345678000199"
+
 
 def test_idempotency_key_table_round_trip():
-    db = get_db()
+    db = get_db(FINANCIADOR_TESTE)
     db.table("idempotency_key").delete().eq("chave", "test-key-plan08").execute()
 
     inserted = db.table("idempotency_key").insert({
@@ -290,7 +295,7 @@ def test_idempotency_key_table_round_trip():
 
 
 def test_referencia_sequences_increment():
-    db = get_db()
+    db = get_db(FINANCIADOR_TESTE)
     with db._engine.connect() as conn:
         primeiro = conn.execute(sqlalchemy.text("SELECT nextval('optin_referencia_seq')")).scalar()
         segundo = conn.execute(sqlalchemy.text("SELECT nextval('optin_referencia_seq')")).scalar()
@@ -319,15 +324,16 @@ CREATE SEQUENCE optout_referencia_seq START 1;
 
 - [ ] **Step 3: Aplicar a migração no Cloud SQL ativo**
 
-`registradora-506000:us-east1:app-db` (confirmado como instância dedicada de dev/homolog deste serviço) — aplicar via o mesmo `CloudSqlClient` já usado pelos testes, não há CLI `psql`/`gcloud` disponível neste ambiente:
+Desde o Plan 09, cada tenant tem seu próprio banco Cloud SQL (`shared.tenant_config`/`get_db(financiador_id)`) — esta migração precisa ser aplicada **em cada banco de tenant**, não uma vez só globalmente. Hoje só existe o tenant de dev (`financiador_id="12345678000199"`, apontando para `registradora-506000:us-east1:app-db`, confirmado como instância dedicada de dev/homolog); aplicar nele agora. Ao provisionar um tenant real futuro, esta mesma migração entra no processo manual/scriptado de onboarding (design de multi-tenancy §9). Aplicar via o mesmo `CloudSqlClient` já usado pelos testes, não há CLI `psql`/`gcloud` disponível neste ambiente:
 
 ```bash
 python -c "
 import sqlalchemy
 from shared.cloudsql_client import get_db
 
+FINANCIADOR_TESTE = '12345678000199'
 statements = [s.strip() for s in open('docker/initdb/02-idempotency-e-referencia.sql').read().split(';') if s.strip()]
-engine = get_db()._engine
+engine = get_db(FINANCIADOR_TESTE)._engine
 with engine.begin() as conn:
     for stmt in statements:
         conn.execute(sqlalchemy.text(stmt))
@@ -356,8 +362,8 @@ git commit -m "feat: idempotency_key table and referencia sequences (SPEC-01 §5
 - Test: `optin/apps/optin/tests/test_idempotency.py`
 
 **Interfaces:**
-- Consumes: `get_db()` (shared/cloudsql_client.py); tabela `idempotency_key` (Task 2).
-- Produces: `buscar_resposta_em_cache(recurso: str, chave: str) -> dict | None`; `guardar_resposta(recurso: str, chave: str, http_status: int, response_body) -> None`; `idempotente(recurso: str)` (decorator factory Django).
+- Consumes: `get_db(financiador_id)` (shared/cloudsql_client.py, Plan 09); tabela `idempotency_key` (Task 2); `request.financiador_id` (populado por `jwt_required`, Plan 09).
+- Produces: `buscar_resposta_em_cache(financiador_id: str, recurso: str, chave: str) -> dict | None`; `guardar_resposta(financiador_id: str, recurso: str, chave: str, http_status: int, response_body) -> None`; `idempotente(recurso: str)` (decorator factory Django — lê `request.financiador_id`, já populado por `jwt_required`, que roda antes dele em todo empilhamento de decorators do Plan 08).
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -373,9 +379,11 @@ from django.test import RequestFactory
 
 from shared.cloudsql_client import get_db
 
+FINANCIADOR_TESTE = "12345678000199"
 
-def _limpar(chave):
-    get_db().table("idempotency_key").delete().eq("chave", chave).execute()
+
+def _limpar(financiador_id, chave):
+    get_db(financiador_id).table("idempotency_key").delete().eq("chave", chave).execute()
 
 
 def test_idempotente_retorna_422_sem_header():
@@ -386,6 +394,7 @@ def test_idempotente_retorna_422_sem_header():
         return JsonResponse({"ok": True}, status=201)
 
     request = RequestFactory().post("/x")
+    request.financiador_id = FINANCIADOR_TESTE
     response = view(request)
     assert response.status_code == 422
     assert json.loads(response.content)["erro"] == "VAL011"
@@ -394,7 +403,7 @@ def test_idempotente_retorna_422_sem_header():
 def test_idempotente_executa_view_e_guarda_resposta():
     from apps.optin.idempotency import idempotente
 
-    _limpar("chave-1")
+    _limpar(FINANCIADOR_TESTE, "chave-1")
     chamadas = []
 
     @idempotente("teste_recurso")
@@ -403,20 +412,21 @@ def test_idempotente_executa_view_e_guarda_resposta():
         return JsonResponse({"id": "abc"}, status=201)
 
     request = RequestFactory().post("/x", HTTP_IDEMPOTENCY_KEY="chave-1")
+    request.financiador_id = FINANCIADOR_TESTE
     response = view(request)
 
     assert response.status_code == 201
     assert len(chamadas) == 1
 
-    cache = get_db().table("idempotency_key").select("*").eq("chave", "chave-1").execute().data
+    cache = get_db(FINANCIADOR_TESTE).table("idempotency_key").select("*").eq("chave", "chave-1").execute().data
     assert cache[0]["response_body"] == {"id": "abc"}
-    _limpar("chave-1")
+    _limpar(FINANCIADOR_TESTE, "chave-1")
 
 
 def test_idempotente_retorna_resposta_cacheada_sem_chamar_view_de_novo():
     from apps.optin.idempotency import idempotente
 
-    _limpar("chave-2")
+    _limpar(FINANCIADOR_TESTE, "chave-2")
     chamadas = []
 
     @idempotente("teste_recurso")
@@ -425,13 +435,14 @@ def test_idempotente_retorna_resposta_cacheada_sem_chamar_view_de_novo():
         return JsonResponse({"id": "abc"}, status=201)
 
     request = RequestFactory().post("/x", HTTP_IDEMPOTENCY_KEY="chave-2")
+    request.financiador_id = FINANCIADOR_TESTE
     view(request)
     segunda = view(request)
 
     assert len(chamadas) == 1
     assert segunda.status_code == 201
     assert json.loads(segunda.content) == {"id": "abc"}
-    _limpar("chave-2")
+    _limpar(FINANCIADOR_TESTE, "chave-2")
 ```
 
 Run: `pytest apps/optin/tests/test_idempotency.py -v`
@@ -455,15 +466,16 @@ from django.http import JsonResponse
 from shared.cloudsql_client import get_db
 
 
-def buscar_resposta_em_cache(recurso: str, chave: str) -> dict:
+def buscar_resposta_em_cache(financiador_id: str, recurso: str, chave: str) -> dict:
     rows = (
-        get_db().table("idempotency_key").select("*").eq("recurso", recurso).eq("chave", chave).execute().data
+        get_db(financiador_id).table("idempotency_key").select("*")
+        .eq("recurso", recurso).eq("chave", chave).execute().data
     )
     return rows[0] if rows else None
 
 
-def guardar_resposta(recurso: str, chave: str, http_status: int, response_body) -> None:
-    get_db().table("idempotency_key").insert({
+def guardar_resposta(financiador_id: str, recurso: str, chave: str, http_status: int, response_body) -> None:
+    get_db(financiador_id).table("idempotency_key").insert({
         "recurso": recurso,
         "chave": chave,
         "http_status": http_status,
@@ -481,12 +493,12 @@ def idempotente(recurso: str):
                     {"erro": "VAL011", "mensagem": "header Idempotency-Key é obrigatório"}, status=422
                 )
 
-            cache = buscar_resposta_em_cache(recurso, chave)
+            cache = buscar_resposta_em_cache(request.financiador_id, recurso, chave)
             if cache:
                 return JsonResponse(cache["response_body"], status=cache["http_status"])
 
             response = view_func(request, *args, **kwargs)
-            guardar_resposta(recurso, chave, response.status_code, json.loads(response.content))
+            guardar_resposta(request.financiador_id, recurso, chave, response.status_code, json.loads(response.content))
             return response
 
         return wrapper
@@ -822,17 +834,20 @@ git commit -m "feat: map CERC 207 items to local optin/optout state transitions"
 - Test: `optin/apps/optin/tests/test_repository.py`
 
 **Interfaces:**
-- Consumes: `get_db()`; `conjuntos_se_sobrepoem`/`vigencias_se_sobrepoem` (Task 4).
-- Produces (`QueryBuilder`): `.gte(field, value)`, `.lte(field, value)`.
-- Produces (`repository.py`): `proxima_referencia_externa(prefixo: str, sequencia: str) -> str`; `criar_optin_pendente(dados: dict) -> dict`; `buscar_por_id(optin_id: str) -> dict | None`; `existe_optin_ativo_equivalente(documento_ufr, documento_titular, credenciadoras: set, arranjos: set, vigencia_inicio, vigencia_fim) -> bool`; `atualizar_status(optin_id: str, status: str, protocolo_cerc: str = None) -> dict`; `atualizar_campos(optin_id: str, dados: dict) -> dict`; `listar(filtros: dict, limit: int) -> list`; `arranjos_ativos() -> set`; `criar_optout_pendente(optin_id: str) -> dict`; `confirmar_optout(optout_id: str, optin_id: str, protocolo_cerc: str) -> None`; `rejeitar_optout(optout_id: str) -> None`.
+- Consumes: `get_db(financiador_id)` (Plan 09); `conjuntos_se_sobrepoem`/`vigencias_se_sobrepoem` (Task 4).
+- Produces (`QueryBuilder`): `.gte(field, value)`, `.lte(field, value)` — inalterado pela multi-tenancy (camada de banco pura, sem noção de tenant).
+- Produces (`repository.py` — `financiador_id: str` é sempre o primeiro parâmetro, repassado a todo `get_db(financiador_id)` interno): `proxima_referencia_externa(financiador_id: str, prefixo: str, sequencia: str) -> str`; `criar_optin_pendente(financiador_id: str, dados: dict) -> dict`; `buscar_por_id(financiador_id: str, optin_id: str) -> dict | None`; `buscar_ativos_por_ufr(financiador_id: str, documento_ufr: str, documento_titular: str) -> list`; `existe_optin_ativo_equivalente(financiador_id: str, documento_ufr, documento_titular, credenciadoras: set, arranjos: set, vigencia_inicio, vigencia_fim) -> bool`; `atualizar_status(financiador_id: str, optin_id: str, status: str, protocolo_cerc: str = None) -> dict`; `atualizar_campos(financiador_id: str, optin_id: str, dados: dict) -> dict`; `listar(financiador_id: str, filtros: dict, limit: int) -> list`; `arranjos_ativos(financiador_id: str) -> set`; `criar_optout_pendente(financiador_id: str, optin_id: str) -> dict`; `confirmar_optout(financiador_id: str, optout_id: str, optin_id: str, protocolo_cerc: str) -> None`; `rejeitar_optout(financiador_id: str, optout_id: str) -> None`.
 
 - [ ] **Step 1: Escrever os testes que falham**
 
 Adicionar ao final de `shared/tests/test_cloudsql_client.py`:
 
 ```python
+FINANCIADOR_TESTE = "12345678000199"  # já definido em shared/tests/test_cloudsql_client.py pelo Plan 09 — reaproveitar a constante existente, não redeclarar se já presente
+
+
 def test_gte_lte_filters_range_query():
-    db = get_db()
+    db = get_db(FINANCIADOR_TESTE)
     db.table("dominio_arranjo").delete().eq("codigo", "GTE1").execute()
     db.table("dominio_arranjo").delete().eq("codigo", "GTE2").execute()
     try:
@@ -871,18 +886,19 @@ load_dotenv()
 from shared.cloudsql_client import get_db
 
 DOC_UFR = "22751826000125"
+FINANCIADOR_TESTE = "12345678000199"
 
 
 def _limpar():
     ids = [
         r["id"]
-        for r in get_db().table("optin").select("id").eq("documento_ufr", DOC_UFR).execute().data
+        for r in get_db(FINANCIADOR_TESTE).table("optin").select("id").eq("documento_ufr", DOC_UFR).execute().data
     ]
     for optin_id in ids:
-        get_db().table("optin_credenciadora").delete().eq("optin_id", optin_id).execute()
-        get_db().table("optin_arranjo").delete().eq("optin_id", optin_id).execute()
-        get_db().table("optout").delete().eq("optin_id", optin_id).execute()
-        get_db().table("optin").delete().eq("id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optin_credenciadora").delete().eq("optin_id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optin_arranjo").delete().eq("optin_id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optout").delete().eq("optin_id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optin").delete().eq("id", optin_id).execute()
 
 
 def _dados_base(**overrides):
@@ -908,7 +924,7 @@ def test_criar_optin_pendente_grava_optin_e_filhas():
     from apps.optin import repository
 
     _limpar()
-    optin = repository.criar_optin_pendente(_dados_base())
+    optin = repository.criar_optin_pendente(FINANCIADOR_TESTE, _dados_base())
 
     assert optin["status"] == "PENDENTE"
     assert optin["credenciadoras"] == ["99T"]
@@ -920,15 +936,15 @@ def test_criar_optin_pendente_grava_optin_e_filhas():
 def test_buscar_por_id_retorna_none_quando_nao_existe():
     from apps.optin import repository
 
-    assert repository.buscar_por_id("opt_inexistente") is None
+    assert repository.buscar_por_id(FINANCIADOR_TESTE, "opt_inexistente") is None
 
 
 def test_atualizar_status_muda_status_e_protocolo():
     from apps.optin import repository
 
     _limpar()
-    optin = repository.criar_optin_pendente(_dados_base())
-    atualizado = repository.atualizar_status(optin["id"], "ATIVO", protocolo_cerc="P-123")
+    optin = repository.criar_optin_pendente(FINANCIADOR_TESTE, _dados_base())
+    atualizado = repository.atualizar_status(FINANCIADOR_TESTE, optin["id"], "ATIVO", protocolo_cerc="P-123")
 
     assert atualizado["status"] == "ATIVO"
     assert atualizado["protocolo_cerc"] == "P-123"
@@ -939,10 +955,11 @@ def test_existe_optin_ativo_equivalente_detecta_sobreposicao():
     from apps.optin import repository
 
     _limpar()
-    optin = repository.criar_optin_pendente(_dados_base())
-    repository.atualizar_status(optin["id"], "ATIVO", protocolo_cerc="P-1")
+    optin = repository.criar_optin_pendente(FINANCIADOR_TESTE, _dados_base())
+    repository.atualizar_status(FINANCIADOR_TESTE, optin["id"], "ATIVO", protocolo_cerc="P-1")
 
     conflito = repository.existe_optin_ativo_equivalente(
+        FINANCIADOR_TESTE,
         documento_ufr=DOC_UFR,
         documento_titular=DOC_UFR,
         credenciadoras={"99T"},
@@ -959,6 +976,7 @@ def test_existe_optin_ativo_equivalente_falso_quando_sem_ativos():
 
     _limpar()
     conflito = repository.existe_optin_ativo_equivalente(
+        FINANCIADOR_TESTE,
         documento_ufr=DOC_UFR,
         documento_titular=DOC_UFR,
         credenciadoras={"VCC"},
@@ -973,13 +991,13 @@ def test_listar_filtra_por_status():
     from apps.optin import repository
 
     _limpar()
-    optin = repository.criar_optin_pendente(_dados_base())
-    repository.atualizar_status(optin["id"], "ATIVO", protocolo_cerc="P-1")
+    optin = repository.criar_optin_pendente(FINANCIADOR_TESTE, _dados_base())
+    repository.atualizar_status(FINANCIADOR_TESTE, optin["id"], "ATIVO", protocolo_cerc="P-1")
 
-    resultado = repository.listar({"status": "ATIVO", "documento_ufr": DOC_UFR}, limit=50)
+    resultado = repository.listar(FINANCIADOR_TESTE, {"status": "ATIVO", "documento_ufr": DOC_UFR}, limit=50)
     assert any(r["id"] == optin["id"] for r in resultado)
 
-    vazio = repository.listar({"status": "REJEITADO", "documento_ufr": DOC_UFR}, limit=50)
+    vazio = repository.listar(FINANCIADOR_TESTE, {"status": "REJEITADO", "documento_ufr": DOC_UFR}, limit=50)
     assert vazio == []
     _limpar()
 
@@ -988,16 +1006,16 @@ def test_criar_e_confirmar_optout():
     from apps.optin import repository
 
     _limpar()
-    optin = repository.criar_optin_pendente(_dados_base())
-    repository.atualizar_status(optin["id"], "ATIVO", protocolo_cerc="P-1")
+    optin = repository.criar_optin_pendente(FINANCIADOR_TESTE, _dados_base())
+    repository.atualizar_status(FINANCIADOR_TESTE, optin["id"], "ATIVO", protocolo_cerc="P-1")
 
-    optout = repository.criar_optout_pendente(optin["id"])
+    optout = repository.criar_optout_pendente(FINANCIADOR_TESTE, optin["id"])
     assert optout["status"] == "PENDENTE"
     assert optout["referencia_externa"].startswith("OPTOUT-")
 
-    repository.confirmar_optout(optout["id"], optin["id"], "P-1")
+    repository.confirmar_optout(FINANCIADOR_TESTE, optout["id"], optin["id"], "P-1")
 
-    optin_atualizado = repository.buscar_por_id(optin["id"])
+    optin_atualizado = repository.buscar_por_id(FINANCIADOR_TESTE, optin["id"])
     assert optin_atualizado["status"] == "ENCERRADO"
     _limpar()
 ```
@@ -1047,29 +1065,29 @@ from apps.optin.validation import conjuntos_se_sobrepoem, vigencias_se_sobrepoem
 from shared.cloudsql_client import get_db
 
 
-def proxima_referencia_externa(prefixo: str, sequencia: str) -> str:
+def proxima_referencia_externa(financiador_id: str, prefixo: str, sequencia: str) -> str:
     ano = timezone.localtime(timezone.now()).year
-    with get_db()._engine.connect() as conn:
+    with get_db(financiador_id)._engine.connect() as conn:
         seq = conn.execute(sqlalchemy.text(f"SELECT nextval('{sequencia}')")).scalar()
     return f"{prefixo}-{ano}-{seq:09d}"
 
 
-def _com_filhas(optin: dict) -> dict:
+def _com_filhas(financiador_id: str, optin: dict) -> dict:
     optin_id = optin["id"]
     optin["credenciadoras"] = [
-        r["cnpj"] for r in get_db().table("optin_credenciadora").select("cnpj").eq("optin_id", optin_id).execute().data
+        r["cnpj"] for r in get_db(financiador_id).table("optin_credenciadora").select("cnpj").eq("optin_id", optin_id).execute().data
     ]
     optin["arranjos"] = [
-        r["codigo"] for r in get_db().table("optin_arranjo").select("codigo").eq("optin_id", optin_id).execute().data
+        r["codigo"] for r in get_db(financiador_id).table("optin_arranjo").select("codigo").eq("optin_id", optin_id).execute().data
     ]
     return optin
 
 
-def criar_optin_pendente(dados: dict) -> dict:
+def criar_optin_pendente(financiador_id: str, dados: dict) -> dict:
     optin_id = f"opt_{ULID()}"
-    referencia_externa = proxima_referencia_externa("OPTIN", "optin_referencia_seq")
+    referencia_externa = proxima_referencia_externa(financiador_id, "OPTIN", "optin_referencia_seq")
 
-    with get_db()._engine.begin() as conn:
+    with get_db(financiador_id)._engine.begin() as conn:
         conn.execute(sqlalchemy.text("""
             INSERT INTO optin (
                 id, referencia_externa, origem, status, cnpj_solicitante, cnpj_financiador,
@@ -1105,29 +1123,29 @@ def criar_optin_pendente(dados: dict) -> dict:
                 {"optin_id": optin_id, "codigo": codigo},
             )
 
-    return buscar_por_id(optin_id)
+    return buscar_por_id(financiador_id, optin_id)
 
 
-def buscar_por_id(optin_id: str):
-    rows = get_db().table("optin").select("*").eq("id", optin_id).execute().data
+def buscar_por_id(financiador_id: str, optin_id: str):
+    rows = get_db(financiador_id).table("optin").select("*").eq("id", optin_id).execute().data
     if not rows:
         return None
-    return _com_filhas(rows[0])
+    return _com_filhas(financiador_id, rows[0])
 
 
-def buscar_ativos_por_ufr(documento_ufr: str, documento_titular: str) -> list:
+def buscar_ativos_por_ufr(financiador_id: str, documento_ufr: str, documento_titular: str) -> list:
     candidatos = (
-        get_db().table("optin").select("*")
+        get_db(financiador_id).table("optin").select("*")
         .eq("documento_ufr", documento_ufr)
         .eq("documento_titular", documento_titular)
         .eq("status", "ATIVO")
         .execute().data
     )
-    return [_com_filhas(c) for c in candidatos]
+    return [_com_filhas(financiador_id, c) for c in candidatos]
 
 
-def existe_optin_ativo_equivalente(documento_ufr, documento_titular, credenciadoras, arranjos, vigencia_inicio, vigencia_fim) -> bool:
-    for candidato in buscar_ativos_por_ufr(documento_ufr, documento_titular):
+def existe_optin_ativo_equivalente(financiador_id: str, documento_ufr, documento_titular, credenciadoras, arranjos, vigencia_inicio, vigencia_fim) -> bool:
+    for candidato in buscar_ativos_por_ufr(financiador_id, documento_ufr, documento_titular):
         if not conjuntos_se_sobrepoem(set(candidato["credenciadoras"]), credenciadoras):
             continue
         if not conjuntos_se_sobrepoem(set(candidato["arranjos"]), arranjos):
@@ -1137,40 +1155,40 @@ def existe_optin_ativo_equivalente(documento_ufr, documento_titular, credenciado
     return False
 
 
-def atualizar_status(optin_id: str, status: str, protocolo_cerc: str = None) -> dict:
+def atualizar_status(financiador_id: str, optin_id: str, status: str, protocolo_cerc: str = None) -> dict:
     dados = {"status": status, "atualizado_em": timezone.now()}
     if protocolo_cerc is not None:
         dados["protocolo_cerc"] = protocolo_cerc
-    resultado = get_db().table("optin").update(dados).eq("id", optin_id).execute()
-    return _com_filhas(resultado.data[0])
+    resultado = get_db(financiador_id).table("optin").update(dados).eq("id", optin_id).execute()
+    return _com_filhas(financiador_id, resultado.data[0])
 
 
-def atualizar_campos(optin_id: str, dados: dict) -> dict:
+def atualizar_campos(financiador_id: str, optin_id: str, dados: dict) -> dict:
     dados = {**dados, "atualizado_em": timezone.now()}
-    resultado = get_db().table("optin").update(dados).eq("id", optin_id).execute()
-    return _com_filhas(resultado.data[0])
+    resultado = get_db(financiador_id).table("optin").update(dados).eq("id", optin_id).execute()
+    return _com_filhas(financiador_id, resultado.data[0])
 
 
-def listar(filtros: dict, limit: int) -> list:
-    query = get_db().table("optin").select("*")
+def listar(financiador_id: str, filtros: dict, limit: int) -> list:
+    query = get_db(financiador_id).table("optin").select("*")
     for campo in ("status", "documento_ufr", "origem", "carteira"):
         if filtros.get(campo):
             query = query.eq(campo, filtros[campo])
     if filtros.get("vigente_em"):
         query = query.lte("vigencia_inicio", filtros["vigente_em"]).gte("vigencia_fim", filtros["vigente_em"])
     resultado = query.order("criado_em", desc=True).limit(limit).execute().data
-    return [_com_filhas(r) for r in resultado]
+    return [_com_filhas(financiador_id, r) for r in resultado]
 
 
-def arranjos_ativos() -> set:
-    rows = get_db().table("dominio_arranjo").select("codigo").eq("ativo", True).execute().data
+def arranjos_ativos(financiador_id: str) -> set:
+    rows = get_db(financiador_id).table("dominio_arranjo").select("codigo").eq("ativo", True).execute().data
     return {r["codigo"] for r in rows}
 
 
-def criar_optout_pendente(optin_id: str) -> dict:
+def criar_optout_pendente(financiador_id: str, optin_id: str) -> dict:
     optout_id = f"optout_{ULID()}"
-    referencia_externa = proxima_referencia_externa("OPTOUT", "optout_referencia_seq")
-    inserted = get_db().table("optout").insert({
+    referencia_externa = proxima_referencia_externa(financiador_id, "OPTOUT", "optout_referencia_seq")
+    inserted = get_db(financiador_id).table("optout").insert({
         "id": optout_id,
         "optin_id": optin_id,
         "referencia_externa": referencia_externa,
@@ -1179,13 +1197,13 @@ def criar_optout_pendente(optin_id: str) -> dict:
     return inserted.data[0]
 
 
-def confirmar_optout(optout_id: str, optin_id: str, protocolo_cerc: str) -> None:
-    get_db().table("optout").update({"status": "CONFIRMADO", "protocolo_cerc": protocolo_cerc}).eq("id", optout_id).execute()
-    get_db().table("optin").update({"status": "ENCERRADO", "atualizado_em": timezone.now()}).eq("id", optin_id).execute()
+def confirmar_optout(financiador_id: str, optout_id: str, optin_id: str, protocolo_cerc: str) -> None:
+    get_db(financiador_id).table("optout").update({"status": "CONFIRMADO", "protocolo_cerc": protocolo_cerc}).eq("id", optout_id).execute()
+    get_db(financiador_id).table("optin").update({"status": "ENCERRADO", "atualizado_em": timezone.now()}).eq("id", optin_id).execute()
 
 
-def rejeitar_optout(optout_id: str) -> None:
-    get_db().table("optout").update({"status": "REJEITADO"}).eq("id", optout_id).execute()
+def rejeitar_optout(financiador_id: str, optout_id: str) -> None:
+    get_db(financiador_id).table("optout").update({"status": "REJEITADO"}).eq("id", optout_id).execute()
 ```
 
 - [ ] **Step 4: Rodar e confirmar sucesso**
@@ -1209,20 +1227,14 @@ git commit -m "feat: optin repository (create/read/update, anti-duplicidade §5.
 - Modify: `optin/apps/optin/urls.py`
 - Create: `optin/apps/optin/tests/conftest.py`
 - Test: `optin/apps/optin/tests/test_views_criar_optin.py`
-- Modify: `optin/.env`, `optin/.env.example`
 
 **Interfaces:**
-- Consumes: `jwt_required` (Task 1), `idempotente` (Task 3), `validation.{validar_documento,validar_vigencia,validar_credenciadoras,validar_arranjos,validar_evidencia,mascarar_documento}`, `repository.{criar_optin_pendente,existe_optin_ativo_equivalente,atualizar_status,arranjos_ativos}` (Task 6), `cerc_mapping.{interpretar_item_opt_in,correlacionar_por_referencia}` (Task 5), `services.cerc.client.{registrar_optin,CercApiError}` (Plan 07, corrigido).
+- Consumes: `jwt_required` (Task 1/Plan 09, popula `request.financiador_id`), `idempotente` (Task 3), `validation.{validar_documento,validar_vigencia,validar_credenciadoras,validar_arranjos,validar_evidencia,mascarar_documento}`, `shared.tenant_config.get_tenant_config` (Plan 09), `repository.{criar_optin_pendente,existe_optin_ativo_equivalente,atualizar_status,arranjos_ativos}` (Task 6 — todas exigem `financiador_id` como primeiro argumento), `cerc_mapping.{interpretar_item_opt_in,correlacionar_por_referencia}` (Task 5), `services.cerc.client.{registrar_optin,CercApiError}` (Plan 07/09, `registrar_optin` exige `financiador_id` como primeiro argumento).
 - Produces: `criar_optin(request)`; `optins_collection(request)` (dispatcher POST/GET, GET implementado na Task 8); `_serializar_optin(optin: dict) -> dict` (reaproveitado pelas Tasks 8-10).
 
-- [ ] **Step 1: Configurar env e fixture de autenticação**
+- [ ] **Step 1: Fixture de autenticação com claim `financiador_id`**
 
-Adicionar a `.env.example` e `.env` (valor de desenvolvimento, não é segredo):
-
-```
-CERC_CNPJ_SOLICITANTE=12345678000199
-CERC_CNPJ_FINANCIADOR=12345678000199
-```
+Não é mais necessário configurar `CERC_CNPJ_SOLICITANTE`/`CERC_CNPJ_FINANCIADOR` — essas env vars não existem mais (Plan 09 as substituiu por config por tenant). O único trabalho deste Step é a fixture de autenticação, cujo JWT precisa carregar o claim `financiador_id` exigido por `jwt_required` desde o Plan 09.
 
 ```python
 # optin/apps/optin/tests/conftest.py
@@ -1254,15 +1266,20 @@ def _iam_jwt_env(monkeypatch, rsa_keypair):
     _, public_pem = rsa_keypair
     monkeypatch.setenv("IAM_JWT_PUBLIC_KEY", public_pem)
     monkeypatch.setenv("IAM_JWT_ISSUER", "brikz-iam")
-    monkeypatch.setenv("CERC_CNPJ_SOLICITANTE", "12345678000199")
-    monkeypatch.setenv("CERC_CNPJ_FINANCIADOR", "12345678000199")
 
 
 @pytest.fixture
 def auth_headers(rsa_keypair):
     private_pem, _ = rsa_keypair
     token = pyjwt.encode(
-        {"exp": int(time.time()) + 300, "iss": "brikz-iam", "sub": "user-1"}, private_pem, algorithm="RS256"
+        {
+            "exp": int(time.time()) + 300,
+            "iss": "brikz-iam",
+            "sub": "user-1",
+            "financiador_id": "12345678000199",
+        },
+        private_pem,
+        algorithm="RS256",
     )
     return {"HTTP_AUTHORIZATION": f"Bearer {token}"}
 ```
@@ -1282,6 +1299,7 @@ load_dotenv()
 from shared.cloudsql_client import get_db
 
 DOC_UFR = "22751826000125"
+FINANCIADOR_TESTE = "12345678000199"
 CORPO_VALIDO = {
     "usuarioFinalRecebedor": DOC_UFR,
     "credenciadoras": ["99T"],
@@ -1294,23 +1312,23 @@ CORPO_VALIDO = {
 
 
 def _limpar():
-    ids = [r["id"] for r in get_db().table("optin").select("id").eq("documento_ufr", DOC_UFR).execute().data]
+    ids = [r["id"] for r in get_db(FINANCIADOR_TESTE).table("optin").select("id").eq("documento_ufr", DOC_UFR).execute().data]
     for optin_id in ids:
-        get_db().table("optin_credenciadora").delete().eq("optin_id", optin_id).execute()
-        get_db().table("optin_arranjo").delete().eq("optin_id", optin_id).execute()
-        get_db().table("optin").delete().eq("id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optin_credenciadora").delete().eq("optin_id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optin_arranjo").delete().eq("optin_id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optin").delete().eq("id", optin_id).execute()
 
 
 @pytest.fixture(autouse=True)
 def _seed_dominio_arranjo():
-    get_db().table("dominio_arranjo").delete().eq("codigo", "VCC").execute()
-    get_db().table("dominio_arranjo").insert({
+    get_db(FINANCIADOR_TESTE).table("dominio_arranjo").delete().eq("codigo", "VCC").execute()
+    get_db(FINANCIADOR_TESTE).table("dominio_arranjo").insert({
         "codigo": "VCC", "descricao": "Visa Crédito", "ativo": True, "atualizado_em": "2026-01-01T00:00:00-03:00",
     }).execute()
     _limpar()
     yield
     _limpar()
-    get_db().table("dominio_arranjo").delete().eq("codigo", "VCC").execute()
+    get_db(FINANCIADOR_TESTE).table("dominio_arranjo").delete().eq("codigo", "VCC").execute()
 
 
 @respx.mock
@@ -1427,7 +1445,7 @@ from apps.optin.validation import (
 )
 from services.cerc.client import CercApiError, registrar_optin
 from shared.jwt_auth import jwt_required
-import os
+from shared.tenant_config import get_tenant_config
 
 logger = logging.getLogger(__name__)
 
@@ -1477,7 +1495,7 @@ def criar_optin(request):
         credenciadoras = payload.get("credenciadoras") or []
         arranjos = payload.get("arranjos") or []
         validar_credenciadoras(credenciadoras)
-        validar_arranjos(arranjos, repository.arranjos_ativos())
+        validar_arranjos(arranjos, repository.arranjos_ativos(request.financiador_id))
         validar_evidencia(payload.get("evidenciaAutorizacaoId"))
 
         data_assinatura = datetime.date.fromisoformat(payload["dataAssinatura"])
@@ -1490,13 +1508,15 @@ def criar_optin(request):
         return _erro_json("VAL_CAMPO_OBRIGATORIO", "campo obrigatório ausente ou mal formatado", 422)
 
     if repository.existe_optin_ativo_equivalente(
-        documento_ufr, documento_titular, set(credenciadoras), set(arranjos), vigencia_inicio, vigencia_fim
+        request.financiador_id, documento_ufr, documento_titular, set(credenciadoras), set(arranjos), vigencia_inicio, vigencia_fim
     ):
         return _erro_json("VAL010", "opt-in equivalente já ativo", 409)
 
-    optin = repository.criar_optin_pendente({
-        "cnpj_solicitante": os.environ["CERC_CNPJ_SOLICITANTE"],
-        "cnpj_financiador": os.environ["CERC_CNPJ_FINANCIADOR"],
+    cnpj_solicitante = get_tenant_config(request.financiador_id)["cerc_cnpj_solicitante"]
+
+    optin = repository.criar_optin_pendente(request.financiador_id, {
+        "cnpj_solicitante": cnpj_solicitante,
+        "cnpj_financiador": request.financiador_id,
         "documento_ufr": documento_ufr,
         "documento_ufr_tipo": tipo_ufr,
         "documento_titular": documento_titular,
@@ -1515,8 +1535,8 @@ def criar_optin(request):
 
     payload_cerc = {
         "referenciaExterna": optin["referencia_externa"],
-        "cnpjSolicitante": os.environ["CERC_CNPJ_SOLICITANTE"],
-        "cnpjFinanciador": os.environ["CERC_CNPJ_FINANCIADOR"],
+        "cnpjSolicitante": cnpj_solicitante,
+        "cnpjFinanciador": request.financiador_id,
         "dataAssinaturaOptIn": str(data_assinatura),
         "carteira": optin.get("carteira"),
         "definicaoUnidadeRecebivel": {
@@ -1530,9 +1550,9 @@ def criar_optin(request):
     }
 
     try:
-        resposta = registrar_optin(payload_cerc, correlacao_id=optin["referencia_externa"])
+        resposta = registrar_optin(request.financiador_id, payload_cerc, correlacao_id=optin["referencia_externa"])
     except Exception as exc:  # noqa: BLE001 - transporte (httpx) e negócio (CercApiError) tratados juntos aqui; classificação fina retentável/não-retentável (§9.2) fica no job de reconciliação, fora de escopo
-        repository.atualizar_status(optin["id"], "FALHA_ENVIO")
+        repository.atualizar_status(request.financiador_id, optin["id"], "FALHA_ENVIO")
         logger.warning("falha ao enviar optin %s para CERC: %s", optin["referencia_externa"], exc)
         return _erro_json("CERC_INDISPONIVEL", "falha ao registrar opt-in na CERC", 502)
 
@@ -1540,10 +1560,10 @@ def criar_optin(request):
     resultado = interpretar_item_opt_in(item)
 
     if resultado.status_local == "ATIVO":
-        optin_final = repository.atualizar_status(optin["id"], "ATIVO", protocolo_cerc=resultado.protocolo)
+        optin_final = repository.atualizar_status(request.financiador_id, optin["id"], "ATIVO", protocolo_cerc=resultado.protocolo)
         return JsonResponse(_serializar_optin(optin_final), status=201)
 
-    repository.atualizar_status(optin["id"], "REJEITADO")
+    repository.atualizar_status(request.financiador_id, optin["id"], "REJEITADO")
     return _erro_json(resultado.erro_codigo or "REJEITADO", resultado.erro_mensagem or "opt-in rejeitado pela CERC", 422)
 
 
@@ -1573,7 +1593,7 @@ Expected: PASS (5 tests)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add apps/optin/views.py apps/optin/urls.py apps/optin/tests/conftest.py apps/optin/tests/test_views_criar_optin.py .env .env.example
+git add apps/optin/views.py apps/optin/urls.py apps/optin/tests/conftest.py apps/optin/tests/test_views_criar_optin.py
 git commit -m "feat: POST /api/v1/optins (create) with JWT, idempotency, anti-duplicidade"
 ```
 
@@ -1587,7 +1607,7 @@ git commit -m "feat: POST /api/v1/optins (create) with JWT, idempotency, anti-du
 - Test: `optin/apps/optin/tests/test_views_listar_detalhar.py`
 
 **Interfaces:**
-- Consumes: `repository.{listar,buscar_por_id}` (Task 6), `_serializar_optin` (Task 7).
+- Consumes: `repository.{listar,buscar_por_id}` (Task 6, exigem `financiador_id` como primeiro argumento), `_serializar_optin` (Task 7).
 - Produces: `listar_optins(request)`; `detalhar_optin(request, optin_id)`; `optin_detail(request, optin_id)` (dispatcher GET/PATCH, PATCH implementado na Task 9); atualiza `optins_collection` para also despachar GET.
 
 - [ ] **Step 1: Escrever o teste que falha**
@@ -1603,20 +1623,21 @@ from apps.optin import repository
 from shared.cloudsql_client import get_db
 
 DOC_UFR = "22751826000125"
+FINANCIADOR_TESTE = "12345678000199"
 
 
 def _limpar():
-    ids = [r["id"] for r in get_db().table("optin").select("id").eq("documento_ufr", DOC_UFR).execute().data]
+    ids = [r["id"] for r in get_db(FINANCIADOR_TESTE).table("optin").select("id").eq("documento_ufr", DOC_UFR).execute().data]
     for optin_id in ids:
-        get_db().table("optin_credenciadora").delete().eq("optin_id", optin_id).execute()
-        get_db().table("optin_arranjo").delete().eq("optin_id", optin_id).execute()
-        get_db().table("optin").delete().eq("id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optin_credenciadora").delete().eq("optin_id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optin_arranjo").delete().eq("optin_id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optin").delete().eq("id", optin_id).execute()
 
 
 def _criar_ativo():
     import datetime
 
-    optin = repository.criar_optin_pendente({
+    optin = repository.criar_optin_pendente(FINANCIADOR_TESTE, {
         "cnpj_solicitante": "12345678000199",
         "cnpj_financiador": "12345678000199",
         "documento_ufr": DOC_UFR,
@@ -1630,7 +1651,7 @@ def _criar_ativo():
         "credenciadoras": ["99T"],
         "arranjos": ["VCC"],
     })
-    return repository.atualizar_status(optin["id"], "ATIVO", protocolo_cerc="P-1")
+    return repository.atualizar_status(FINANCIADOR_TESTE, optin["id"], "ATIVO", protocolo_cerc="P-1")
 
 
 def test_detalhar_optin_retorna_200(client, auth_headers):
@@ -1681,12 +1702,12 @@ def listar_optins(request):
         "vigente_em": request.GET.get("vigenteEm"),
     }
     limit = min(int(request.GET.get("limit", 50)), 200)
-    resultado = repository.listar(filtros, limit)
+    resultado = repository.listar(request.financiador_id, filtros, limit)
     return JsonResponse({"dados": [_serializar_optin(o) for o in resultado]})
 
 
 def detalhar_optin(request, optin_id):
-    optin = repository.buscar_por_id(optin_id)
+    optin = repository.buscar_por_id(request.financiador_id, optin_id)
     if optin is None:
         return _erro_json("OPTIN_NAO_ENCONTRADO", "opt-in não encontrado", 404)
     return JsonResponse(_serializar_optin(optin))
@@ -1745,7 +1766,7 @@ git commit -m "feat: GET /api/v1/optins (list with filters) and GET /api/v1/opti
 - Test: `optin/apps/optin/tests/test_views_atualizar_optin.py`
 
 **Interfaces:**
-- Consumes: `repository.{buscar_por_id,atualizar_campos,arranjos_ativos}`, `cerc_mapping.{interpretar_item_opt_in,correlacionar_por_referencia}`, `services.cerc.client.{atualizar_optin,CercApiError}`.
+- Consumes: `repository.{buscar_por_id,atualizar_campos,arranjos_ativos}` (Task 6, exigem `financiador_id` como primeiro argumento), `cerc_mapping.{interpretar_item_opt_in,correlacionar_por_referencia}`, `services.cerc.client.{atualizar_optin,CercApiError}` (Plan 07/09, `atualizar_optin` exige `financiador_id` como primeiro argumento), `shared.tenant_config.get_tenant_config` (Plan 09).
 - Produces: `atualizar_optin_view(request, optin_id)`; atualiza `optin_detail` para despachar PATCH.
 
 - [ ] **Step 1: Escrever o teste que falha**
@@ -1763,27 +1784,28 @@ from apps.optin import repository
 from shared.cloudsql_client import get_db
 
 DOC_UFR = "22751826000125"
+FINANCIADOR_TESTE = "12345678000199"
 
 
 def _limpar():
-    ids = [r["id"] for r in get_db().table("optin").select("id").eq("documento_ufr", DOC_UFR).execute().data]
+    ids = [r["id"] for r in get_db(FINANCIADOR_TESTE).table("optin").select("id").eq("documento_ufr", DOC_UFR).execute().data]
     for optin_id in ids:
-        get_db().table("optin_credenciadora").delete().eq("optin_id", optin_id).execute()
-        get_db().table("optin_arranjo").delete().eq("optin_id", optin_id).execute()
-        get_db().table("optin").delete().eq("id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optin_credenciadora").delete().eq("optin_id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optin_arranjo").delete().eq("optin_id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optin").delete().eq("id", optin_id).execute()
 
 
 def _criar_ativo():
     import datetime
 
-    optin = repository.criar_optin_pendente({
+    optin = repository.criar_optin_pendente(FINANCIADOR_TESTE, {
         "cnpj_solicitante": "12345678000199", "cnpj_financiador": "12345678000199",
         "documento_ufr": DOC_UFR, "documento_ufr_tipo": "CNPJ", "documento_titular": DOC_UFR,
         "data_assinatura": datetime.date(2026, 8, 10), "vigencia_inicio": datetime.date(2026, 8, 11),
         "vigencia_fim": datetime.date(2027, 8, 10), "carteira": None, "evidencia_id": "doc_teste",
         "credenciadoras": ["99T"], "arranjos": ["VCC"],
     })
-    return repository.atualizar_status(optin["id"], "ATIVO", protocolo_cerc="P-1")
+    return repository.atualizar_status(FINANCIADOR_TESTE, optin["id"], "ATIVO", protocolo_cerc="P-1")
 
 
 @respx.mock
@@ -1856,7 +1878,7 @@ CAMPOS_NAO_ATUALIZAVEIS = {"referenciaExterna", "cnpjSolicitante"}
 @jwt_required
 @idempotente("optin_update")
 def atualizar_optin_view(request, optin_id):
-    optin = repository.buscar_por_id(optin_id)
+    optin = repository.buscar_por_id(request.financiador_id, optin_id)
     if optin is None:
         return _erro_json("OPTIN_NAO_ENCONTRADO", "opt-in não encontrado", 404)
 
@@ -1888,7 +1910,7 @@ def atualizar_optin_view(request, optin_id):
             vigencia_fim = optin["vigencia_fim"]
         if "arranjos" in payload:
             arranjos = payload["arranjos"]
-            validar_arranjos(arranjos, repository.arranjos_ativos())
+            validar_arranjos(arranjos, repository.arranjos_ativos(request.financiador_id))
         if "credenciadoras" in payload:
             credenciadoras = payload["credenciadoras"]
             validar_credenciadoras(credenciadoras)
@@ -1897,7 +1919,7 @@ def atualizar_optin_view(request, optin_id):
 
     payload_cerc = {
         "referenciaExterna": optin["referencia_externa"],
-        "cnpjSolicitante": os.environ["CERC_CNPJ_SOLICITANTE"],
+        "cnpjSolicitante": get_tenant_config(request.financiador_id)["cerc_cnpj_solicitante"],
         "cnpjFinanciador": payload.get("cnpjFinanciador", optin["cnpj_financiador"]),
         "dataAssinaturaOptIn": str(optin["data_assinatura"]),
         "carteira": payload.get("carteira", optin.get("carteira")),
@@ -1912,7 +1934,7 @@ def atualizar_optin_view(request, optin_id):
     }
 
     try:
-        resposta = atualizar_optin_cerc(optin["protocolo_cerc"], payload_cerc, correlacao_id=optin["referencia_externa"])
+        resposta = atualizar_optin_cerc(request.financiador_id, optin["protocolo_cerc"], payload_cerc, correlacao_id=optin["referencia_externa"])
     except Exception as exc:  # noqa: BLE001 - mesmo tratamento uniforme de Task 7
         logger.warning("falha ao atualizar optin %s na CERC: %s", optin["referencia_externa"], exc)
         return _erro_json("CERC_INDISPONIVEL", "falha ao atualizar opt-in na CERC", 502)
@@ -1923,7 +1945,7 @@ def atualizar_optin_view(request, optin_id):
     if resultado.status_local != "ATIVO":
         return _erro_json(resultado.erro_codigo or "REJEITADO", resultado.erro_mensagem or "atualização rejeitada pela CERC", 422)
 
-    optin_final = repository.atualizar_campos(optin_id, {
+    optin_final = repository.atualizar_campos(request.financiador_id, optin_id, {
         "vigencia_fim": vigencia_fim,
         "carteira": payload.get("carteira", optin.get("carteira")),
     })
@@ -1965,7 +1987,7 @@ git commit -m "feat: PATCH /api/v1/optins/{id} (update via same /opt_in, tipoOpe
 - Test: `optin/apps/optin/tests/test_views_optout.py`
 
 **Interfaces:**
-- Consumes: `repository.{buscar_por_id,criar_optout_pendente,confirmar_optout,rejeitar_optout}`, `cerc_mapping.{interpretar_item_opt_out,correlacionar_por_referencia}`, `services.cerc.client.encerrar_optin`.
+- Consumes: `repository.{buscar_por_id,criar_optout_pendente,confirmar_optout,rejeitar_optout}` (Task 6, exigem `financiador_id` como primeiro argumento), `cerc_mapping.{interpretar_item_opt_out,correlacionar_por_referencia}`, `services.cerc.client.encerrar_optin` (Plan 07/09, exige `financiador_id` como primeiro argumento), `shared.tenant_config.get_tenant_config` (Plan 09).
 - Produces: `optin_optout(request, optin_id)`.
 
 - [ ] **Step 1: Escrever o teste que falha**
@@ -1983,30 +2005,31 @@ from apps.optin import repository
 from shared.cloudsql_client import get_db
 
 DOC_UFR = "22751826000125"
+FINANCIADOR_TESTE = "12345678000199"
 
 
 def _limpar():
-    ids = [r["id"] for r in get_db().table("optin").select("id").eq("documento_ufr", DOC_UFR).execute().data]
+    ids = [r["id"] for r in get_db(FINANCIADOR_TESTE).table("optin").select("id").eq("documento_ufr", DOC_UFR).execute().data]
     for optin_id in ids:
-        get_db().table("optout").delete().eq("optin_id", optin_id).execute()
-        get_db().table("optin_credenciadora").delete().eq("optin_id", optin_id).execute()
-        get_db().table("optin_arranjo").delete().eq("optin_id", optin_id).execute()
-        get_db().table("optin").delete().eq("id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optout").delete().eq("optin_id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optin_credenciadora").delete().eq("optin_id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optin_arranjo").delete().eq("optin_id", optin_id).execute()
+        get_db(FINANCIADOR_TESTE).table("optin").delete().eq("id", optin_id).execute()
 
 
 def _criar(status="ATIVO", origem="OPTIN"):
     import datetime
 
-    optin = repository.criar_optin_pendente({
+    optin = repository.criar_optin_pendente(FINANCIADOR_TESTE, {
         "cnpj_solicitante": "12345678000199", "cnpj_financiador": "12345678000199",
         "documento_ufr": DOC_UFR, "documento_ufr_tipo": "CNPJ", "documento_titular": DOC_UFR,
         "data_assinatura": datetime.date(2026, 8, 10), "vigencia_inicio": datetime.date(2026, 8, 11),
         "vigencia_fim": datetime.date(2027, 8, 10), "carteira": None, "evidencia_id": "doc_teste",
         "credenciadoras": ["99T"], "arranjos": ["VCC"],
     })
-    optin = repository.atualizar_status(optin["id"], status, protocolo_cerc="P-1" if status != "PENDENTE" else None)
+    optin = repository.atualizar_status(FINANCIADOR_TESTE, optin["id"], status, protocolo_cerc="P-1" if status != "PENDENTE" else None)
     if origem != "OPTIN":
-        get_db().table("optin").update({"origem": origem}).eq("id", optin["id"]).execute()
+        get_db(FINANCIADOR_TESTE).table("optin").update({"origem": origem}).eq("id", optin["id"]).execute()
         optin["origem"] = origem
     return optin
 
@@ -2092,7 +2115,7 @@ Adicionar a `views.py`:
 @jwt_required
 @idempotente("optin_optout")
 def optin_optout(request, optin_id):
-    optin = repository.buscar_por_id(optin_id)
+    optin = repository.buscar_por_id(request.financiador_id, optin_id)
     if optin is None:
         return _erro_json("OPTIN_NAO_ENCONTRADO", "opt-in não encontrado", 404)
 
@@ -2102,7 +2125,7 @@ def optin_optout(request, optin_id):
     if optin["status"] not in ("ATIVO", "ERRO_PARCIAL") or not optin.get("protocolo_cerc"):
         return _erro_json("OPT_OUT_NAO_APLICAVEL", "opt-in não está em estado elegível para opt-out", 409)
 
-    optout = repository.criar_optout_pendente(optin_id)
+    optout = repository.criar_optout_pendente(request.financiador_id, optin_id)
 
     try:
         payload = json.loads(request.body or "{}")
@@ -2111,12 +2134,12 @@ def optin_optout(request, optin_id):
 
     payload_cerc = {
         "referenciaExterna": optout["referencia_externa"],
-        "cnpjSolicitante": os.environ["CERC_CNPJ_SOLICITANTE"],
+        "cnpjSolicitante": get_tenant_config(request.financiador_id)["cerc_cnpj_solicitante"],
         "carteira": payload.get("carteira", optin.get("carteira")),
     }
 
     try:
-        resposta = encerrar_optin(optin["protocolo_cerc"], payload_cerc, correlacao_id=optout["referencia_externa"])
+        resposta = encerrar_optin(request.financiador_id, optin["protocolo_cerc"], payload_cerc, correlacao_id=optout["referencia_externa"])
     except Exception as exc:  # noqa: BLE001 - mesmo tratamento uniforme das Tasks 7/9
         logger.warning("falha ao encerrar optin %s na CERC: %s", optin["referencia_externa"], exc)
         return _erro_json("CERC_INDISPONIVEL", "falha ao encerrar opt-in na CERC", 502)
@@ -2125,11 +2148,11 @@ def optin_optout(request, optin_id):
     resultado = interpretar_item_opt_out(item)
 
     if resultado.status_local == "CONFIRMADO":
-        repository.confirmar_optout(optout["id"], optin_id, resultado.protocolo)
-        optin_final = repository.buscar_por_id(optin_id)
+        repository.confirmar_optout(request.financiador_id, optout["id"], optin_id, resultado.protocolo)
+        optin_final = repository.buscar_por_id(request.financiador_id, optin_id)
         return JsonResponse(_serializar_optin(optin_final))
 
-    repository.rejeitar_optout(optout["id"])
+    repository.rejeitar_optout(request.financiador_id, optout["id"])
     return _erro_json(resultado.erro_codigo or "REJEITADO", resultado.erro_mensagem or "opt-out rejeitado pela CERC", 422)
 ```
 
@@ -2191,5 +2214,6 @@ git commit -m "chore: Plan 08 closeout — full suite green"
 - **Spec coverage:** §5.1/§5.2/§5.3/§5.4 (endpoints) — Tasks 7-10. §5.6 (anti-duplicidade) — Tasks 4/6/7. §5 (`Idempotency-Key` obrigatório) — Task 3. Autenticação JWT (§5, design §4) — Task 1. §7.1 (104803 idempotente) e IT-03/IT-04 — Task 5. §8 (mascaramento de documento em log) — Task 4, usado em Task 7. §9.1 (transições PENDENTE→ATIVO/REJEITADO, ATIVO→ENCERRADO) — Tasks 7/10. Gaps conhecidos e não cobertos por este plano (auditoria com diff completo, `sincronizar_dominio_arranjo`, `retry_envio`, webhook, consulta de agenda, VAL009) estão listados em "Riscos e pendências".
 - **Placeholder scan:** nenhum "TODO"/"implementar depois" — os itens fora de escopo estão explicitamente listados em "Riscos e pendências" como decisões conscientes, não como código incompleto.
 - **Type consistency:** `repository.buscar_por_id`/`criar_optin_pendente`/`atualizar_status`/`atualizar_campos` sempre devolvem um `dict` com `credenciadoras`/`arranjos` já anexados (via `_com_filhas`) — `_serializar_optin` (Task 7) depende disso e é reaproveitado sem alteração pelas Tasks 8, 9 e 10. `cerc_mapping.ResultadoItemCerc` é o único formato de retorno usado por `interpretar_item_opt_in`/`interpretar_item_opt_out`, consumido de forma idêntica em Tasks 7, 9 e 10.
+- **Multi-tenancy (retrofit pós-Plan 09):** `financiador_id` é sempre o primeiro parâmetro em toda função de `repository.py` e em toda chamada a `services.cerc.client.*`, sempre sourced de `request.financiador_id` (nunca de `os.environ`) em toda view — Tasks 3, 6, 7, 8, 9 e 10 aplicadas de forma consistente. `cnpjSolicitante` vem de `shared.tenant_config.get_tenant_config(request.financiador_id)["cerc_cnpj_solicitante"]`; `cnpjFinanciador` é o próprio `request.financiador_id`.
 
 **Next:** webhook receptor (SPEC-01 §4.4), jobs de reconciliação (`retry_envio`, `expirar_optins`, `sincronizar_dominio_arranjo` — §9.4) e observabilidade (§10) — nesta ordem, conforme §0 da SPEC-01.
