@@ -137,8 +137,12 @@ def test_mascarar_documento_cnpj():
     assert mascarar_documento("12345678000199") == "12345678****99"
 
 
-def test_mascarar_documento_curto_nao_estoura():
-    assert mascarar_documento("12345678") == "1234****78" or len(mascarar_documento("12345678")) > 0
+def test_mascarar_documento_8_digitos_cnpj_raiz():
+    assert mascarar_documento("12345678") == "12****78"
+
+
+def test_mascarar_documento_11_digitos_cpf():
+    assert mascarar_documento("11144477735") == "11144****35"
 
 
 def test_validar_arranjos_aceita_curinga_sem_checar_dominio():

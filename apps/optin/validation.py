@@ -100,11 +100,13 @@ def vigencias_se_sobrepoem(inicio_a, fim_a, inicio_b, fim_b) -> bool:
 
 def mascarar_documento(documento: str) -> str:
     """SPEC-01 §8: documentos mascarados em log (ex.: '12345678****99')."""
-    if len(documento) <= 4:
-        return "*" * len(documento)
-    if len(documento) <= 6:
-        return documento[:2] + "*" * (len(documento) - 2)
-    return documento[:8] + "*" * (len(documento) - 10) + documento[-2:]
+    tamanho = len(documento)
+    if tamanho <= 4:
+        return "*" * tamanho
+    prefixo = min(8, max(2, tamanho - 6))
+    sufixo_tamanho = min(2, tamanho - prefixo)
+    meio = "*" * (tamanho - prefixo - sufixo_tamanho)
+    return documento[:prefixo] + meio + documento[tamanho - sufixo_tamanho:]
 
 
 def validar_arranjos(lista: list, ativos: set) -> None:
