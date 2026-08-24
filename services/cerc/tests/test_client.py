@@ -1,8 +1,10 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-import os
+import json
+
 import httpx
+import os
 import pytest
 import respx
 
@@ -22,6 +24,18 @@ def _mock_token():
     )
 
 
+def _multistatus(protocolo="P-1", referencia="OPTIN-2026-000001", status="0"):
+    return [
+        {
+            "protocolo": protocolo,
+            "referenciaExterna": referencia,
+            "dataHoraProcessamento": "2026-08-17T12:00:00.000Z",
+            "status": status,
+            "erros": [],
+        }
+    ]
+
+
 @pytest.fixture(autouse=True)
 def _reset_state():
     token_provider._cache["access_token"] = None
@@ -33,18 +47,21 @@ def _reset_state():
 
 
 @respx.mock
-def test_registrar_optin_logs_before_returning():
+def test_registrar_optin_sends_array_body_with_tipo_operacao_c():
     _mock_token()
-    respx.post("https://ap-homolog.cerc.inf.br/opt_in").mock(
-        return_value=httpx.Response(201, json={"protocolo": "P-1"})
+    route = respx.post("https://ap-homolog.cerc.inf.br/opt_in").mock(
+        return_value=httpx.Response(207, json=_multistatus())
     )
 
     result = client.registrar_optin({"cnpjFinanciador": "12345678000199"}, correlacao_id="corr-1")
 
-    assert result == {"protocolo": "P-1"}
+    assert result == _multistatus()
+    sent_body = json.loads(route.calls.last.request.content)
+    assert sent_body == [{"cnpjFinanciador": "12345678000199", "tipoOperacao": "C"}]
+
     logged = get_db().table("cerc_requisicao").select("*").eq("correlacao_id", "corr-1").execute()
     assert len(logged.data) == 1
-    assert logged.data[0]["http_status"] == 201
+    assert logged.data[0]["http_status"] == 207
     assert logged.data[0]["recurso"] == "/opt_in"
     assert logged.data[0]["tentativa"] == 1
 
@@ -60,19 +77,19 @@ def test_registrar_optin_retries_once_on_401():
     opt_in_route = respx.post("https://ap-homolog.cerc.inf.br/opt_in").mock(
         side_effect=[
             httpx.Response(401, json={"erro": "token expirado"}),
-            httpx.Response(201, json={"protocolo": "P-1"}),
+            httpx.Response(207, json=_multistatus()),
         ]
     )
 
     result = client.registrar_optin({"cnpjFinanciador": "12345678000199"}, correlacao_id="corr-1")
 
-    assert result == {"protocolo": "P-1"}
+    assert result == _multistatus()
     assert opt_in_route.call_count == 2
 
     logged = get_db().table("cerc_requisicao").select("*").eq("correlacao_id", "corr-1").order("tentativa").execute()
     assert [row["tentativa"] for row in logged.data] == [1, 2]
     assert logged.data[0]["http_status"] == 401
-    assert logged.data[1]["http_status"] == 201
+    assert logged.data[1]["http_status"] == 207
 
 
 @respx.mock
@@ -110,22 +127,28 @@ def test_registrar_optin_logs_before_raising_on_transport_failure():
 
 
 @respx.mock
-def test_atualizar_optin_calls_expected_path():
+def test_atualizar_optin_calls_opt_in_with_tipo_operacao_a_e_protocolo():
     _mock_token()
-    respx.put("https://ap-homolog.cerc.inf.br/opt_in/P-1").mock(
-        return_value=httpx.Response(200, json={"protocolo": "P-1", "status": "ATIVO"})
+    route = respx.post("https://ap-homolog.cerc.inf.br/opt_in").mock(
+        return_value=httpx.Response(207, json=_multistatus(status="0"))
     )
 
     result = client.atualizar_optin("P-1", {"vigenciaFim": "2027-01-01"}, correlacao_id="corr-1")
-    assert result["status"] == "ATIVO"
+
+    assert result[0]["status"] == "0"
+    sent_body = json.loads(route.calls.last.request.content)
+    assert sent_body == [{"vigenciaFim": "2027-01-01", "tipoOperacao": "A", "protocolo": "P-1"}]
 
 
 @respx.mock
-def test_encerrar_optin_calls_expected_path():
+def test_encerrar_optin_sends_array_body_to_opt_out():
     _mock_token()
-    respx.post("https://ap-homolog.cerc.inf.br/opt_out").mock(
-        return_value=httpx.Response(201, json={"protocolo": "P-1", "status": "ENCERRADO"})
+    route = respx.post("https://ap-homolog.cerc.inf.br/opt_out").mock(
+        return_value=httpx.Response(207, json=_multistatus(status="0"))
     )
 
-    result = client.encerrar_optin("P-1", {"motivo": "solicitado pelo titular"}, correlacao_id="corr-1")
-    assert result["status"] == "ENCERRADO"
+    result = client.encerrar_optin("P-1", {"referenciaExterna": "OPTOUT-2026-000001"}, correlacao_id="corr-1")
+
+    assert result[0]["status"] == "0"
+    sent_body = json.loads(route.calls.last.request.content)
+    assert sent_body == [{"referenciaExterna": "OPTOUT-2026-000001", "protocoloOptIn": "P-1"}]
