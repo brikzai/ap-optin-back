@@ -4,11 +4,14 @@ load_dotenv()
 
 import json
 import os
+import threading
+import time
 
 import pytest
 
 FINANCIADOR_TESTE = "12345678000199"
 FINANCIADOR_TESTE_2 = "99999999000191"
+FINANCIADOR_TESTE_3 = "11111111000100"
 
 from shared.cloudsql_client import get_db  # noqa: E402
 import shared.cloudsql_client as cloudsql_client_module  # noqa: E402
@@ -66,3 +69,48 @@ def test_get_db_cacheia_por_financiador_id(monkeypatch):
     assert db1a is not db2
 
     cloudsql_client_module._clients.pop(FINANCIADOR_TESTE_2, None)
+
+
+def test_get_db_single_flight_on_concurrent_first_access(monkeypatch):
+    # Reproduz o cenário do finding: duas (aqui, dez) threads tentando
+    # get_db() pela primeira vez para o MESMO financiador_id ainda não
+    # cacheado, ao mesmo tempo. Sem o lock por-tenant, cada uma chamaria
+    # _create_engine (engine + connector reais) e a perdedora vazaria um
+    # pool de conexões nunca fechado. Aqui trocamos _create_engine por um
+    # fake lento para alargar a janela de corrida e contamos quantas vezes
+    # ele é de fato chamado.
+    cloudsql_client_module._clients.pop(FINANCIADOR_TESTE_3, None)
+    cloudsql_client_module._locks.pop(FINANCIADOR_TESTE_3, None)
+    monkeypatch.setenv(
+        f"TENANT_{FINANCIADOR_TESTE_3}_CONFIG",
+        os.environ[f"TENANT_{FINANCIADOR_TESTE}_CONFIG"],
+    )
+
+    call_count = 0
+    count_lock = threading.Lock()
+
+    def _slow_fake_engine(config):
+        nonlocal call_count
+        with count_lock:
+            call_count += 1
+        time.sleep(0.05)  # alarga a janela pra forçar a corrida
+        return object()
+
+    monkeypatch.setattr(cloudsql_client_module, "_create_engine", _slow_fake_engine)
+
+    results = []
+
+    def _call():
+        results.append(get_db(FINANCIADOR_TESTE_3))
+
+    threads = [threading.Thread(target=_call) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert call_count == 1  # engine construído uma única vez
+    assert len({id(r) for r in results}) == 1  # todas as threads recebem o mesmo client
+
+    cloudsql_client_module._clients.pop(FINANCIADOR_TESTE_3, None)
+    cloudsql_client_module._locks.pop(FINANCIADOR_TESTE_3, None)

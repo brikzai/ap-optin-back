@@ -11,6 +11,7 @@ vem de shared.tenant_config.get_tenant_config, e o CloudSQLClient resultante
 
 import json
 import logging
+import threading
 from typing import Any, List, Optional
 
 from shared.tenant_config import get_tenant_config
@@ -197,15 +198,29 @@ def _create_engine(config: dict):
     )
 
 
+_meta_lock = threading.Lock()
+_locks: dict = {}
 _clients: dict = {}
+
+
+def _lock_for(financiador_id: str) -> threading.Lock:
+    if financiador_id not in _locks:
+        with _meta_lock:
+            if financiador_id not in _locks:
+                _locks[financiador_id] = threading.Lock()
+    return _locks[financiador_id]
 
 
 def get_db(financiador_id: str) -> CloudSQLClient:
     if financiador_id in _clients:
         return _clients[financiador_id]
 
-    config = get_tenant_config(financiador_id)
-    engine = _create_engine(config)
-    client = CloudSQLClient(engine)
-    _clients[financiador_id] = client
-    return client
+    with _lock_for(financiador_id):
+        if financiador_id in _clients:
+            return _clients[financiador_id]
+
+        config = get_tenant_config(financiador_id)
+        engine = _create_engine(config)
+        client = CloudSQLClient(engine)
+        _clients[financiador_id] = client
+        return client
