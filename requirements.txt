@@ -11,3 +11,4 @@ pytest
 pytest-django
 respx
 gunicorn
+pyjwt[crypto]>=2.8
