@@ -29,6 +29,17 @@ def _limpar():
         get_db(FINANCIADOR_TESTE).table("optin").delete().eq("id", optin_id).execute()
 
 
+def _limpar_idempotencia(chave: str):
+    # Diferente dos demais testes deste arquivo (que só verificam status HTTP/corpo,
+    # sempre estáveis mesmo se a resposta vier do cache de idempotência), estes dois
+    # testes verificam o estado gravado no banco (status FALHA_ENVIO/REJEITADO na
+    # tabela optin). Sem limpar a chave de idempotência, uma reexecução no mesmo banco
+    # (Cloud SQL real, não efêmero) faria o decorator `idempotente` devolver a resposta
+    # cacheada sem chamar a view de novo — nenhuma linha optin seria recriada e o
+    # teste falharia com uma contagem de linhas errada, não com o bug que deveria pegar.
+    get_db(FINANCIADOR_TESTE).table("idempotency_key").delete().eq("recurso", "optin_create").eq("chave", chave).execute()
+
+
 @pytest.fixture(autouse=True)
 def _seed_dominio_arranjo():
     get_db(FINANCIADOR_TESTE).table("dominio_arranjo").delete().eq("codigo", "VCC").execute()
@@ -126,3 +137,62 @@ def test_criar_optin_duplicado_retorna_409_sem_chamar_cerc(client, auth_headers)
 
     assert response.status_code == 409
     assert rota_cerc.call_count == chamadas_apos_primeira
+
+
+@respx.mock
+def test_criar_optin_falha_transporte_cerc_retorna_502_e_marca_falha_envio(client, auth_headers):
+    chave = "key-falha-transporte"
+    _limpar_idempotencia(chave)
+    try:
+        respx.post("https://api.int.cerc.com/oauth/token").mock(
+            return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        )
+        respx.post("https://ap-homolog.cerc.inf.br/opt_in").mock(side_effect=httpx.ConnectError("connection refused"))
+
+        response = client.post(
+            "/api/v1/optins", data=json.dumps(CORPO_VALIDO), content_type="application/json",
+            HTTP_IDEMPOTENCY_KEY=chave, **auth_headers,
+        )
+
+        assert response.status_code == 502
+        assert json.loads(response.content)["erro"] == "CERC_INDISPONIVEL"
+
+        rows = get_db(FINANCIADOR_TESTE).table("optin").select("*").eq("documento_ufr", DOC_UFR).execute().data
+        assert len(rows) == 1
+        assert rows[0]["status"] == "FALHA_ENVIO"
+    finally:
+        _limpar_idempotencia(chave)
+
+
+@respx.mock
+def test_criar_optin_rejeitado_pela_cerc_retorna_422_e_marca_rejeitado(client, auth_headers):
+    chave = "key-rejeitado"
+    _limpar_idempotencia(chave)
+    try:
+        respx.post("https://api.int.cerc.com/oauth/token").mock(
+            return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        )
+
+        def _resposta(request):
+            enviado = json.loads(request.content)[0]
+            return httpx.Response(207, json=[{
+                "referenciaExterna": enviado["referenciaExterna"],
+                "status": "1",
+                "erros": [{"codigo": "104806", "mensagem": "dataInicio menor que dataAssinaturaOptIn"}],
+            }])
+
+        respx.post("https://ap-homolog.cerc.inf.br/opt_in").mock(side_effect=_resposta)
+
+        response = client.post(
+            "/api/v1/optins", data=json.dumps(CORPO_VALIDO), content_type="application/json",
+            HTTP_IDEMPOTENCY_KEY=chave, **auth_headers,
+        )
+
+        assert response.status_code == 422
+        assert json.loads(response.content)["erro"] == "104806"
+
+        rows = get_db(FINANCIADOR_TESTE).table("optin").select("*").eq("documento_ufr", DOC_UFR).execute().data
+        assert len(rows) == 1
+        assert rows[0]["status"] == "REJEITADO"
+    finally:
+        _limpar_idempotencia(chave)
