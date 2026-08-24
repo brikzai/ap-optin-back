@@ -115,26 +115,28 @@ def test_existe_optin_ativo_equivalente_falso_quando_so_credenciadora_e_vigencia
     from apps.optin import repository
 
     _limpar()
-    optin = repository.criar_optin_pendente(FINANCIADOR_TESTE, _dados_base(
-        data_assinatura=datetime.date(2025, 12, 1),
-        credenciadoras=["99T"],
-        arranjos=["ELO"],
-        vigencia_inicio=datetime.date(2026, 1, 1),
-        vigencia_fim=datetime.date(2026, 12, 31),
-    ))
-    repository.atualizar_status(FINANCIADOR_TESTE, optin["id"], "ATIVO", protocolo_cerc="P-2")
+    try:
+        optin = repository.criar_optin_pendente(FINANCIADOR_TESTE, _dados_base(
+            data_assinatura=datetime.date(2025, 12, 1),
+            credenciadoras=["99T"],
+            arranjos=["ELO"],
+            vigencia_inicio=datetime.date(2026, 1, 1),
+            vigencia_fim=datetime.date(2026, 12, 31),
+        ))
+        repository.atualizar_status(FINANCIADOR_TESTE, optin["id"], "ATIVO", protocolo_cerc="P-2")
 
-    conflito = repository.existe_optin_ativo_equivalente(
-        FINANCIADOR_TESTE,
-        documento_ufr=DOC_UFR,
-        documento_titular=DOC_UFR,
-        credenciadoras={"555"},
-        arranjos={"MC"},
-        vigencia_inicio=datetime.date(2026, 6, 1),
-        vigencia_fim=datetime.date(2026, 6, 30),
-    )
-    assert conflito is False
-    _limpar()
+        conflito = repository.existe_optin_ativo_equivalente(
+            FINANCIADOR_TESTE,
+            documento_ufr=DOC_UFR,
+            documento_titular=DOC_UFR,
+            credenciadoras={"555"},
+            arranjos={"MC"},
+            vigencia_inicio=datetime.date(2026, 6, 1),
+            vigencia_fim=datetime.date(2026, 6, 30),
+        )
+        assert conflito is False
+    finally:
+        _limpar()
 
 
 def test_existe_optin_ativo_equivalente_falso_quando_so_conjuntos_sobrepoem():
@@ -144,26 +146,28 @@ def test_existe_optin_ativo_equivalente_falso_quando_so_conjuntos_sobrepoem():
     from apps.optin import repository
 
     _limpar()
-    optin = repository.criar_optin_pendente(FINANCIADOR_TESTE, _dados_base(
-        data_assinatura=datetime.date(2025, 12, 1),
-        credenciadoras=["99T"],
-        arranjos=["99T"],
-        vigencia_inicio=datetime.date(2026, 1, 1),
-        vigencia_fim=datetime.date(2026, 6, 30),
-    ))
-    repository.atualizar_status(FINANCIADOR_TESTE, optin["id"], "ATIVO", protocolo_cerc="P-3")
+    try:
+        optin = repository.criar_optin_pendente(FINANCIADOR_TESTE, _dados_base(
+            data_assinatura=datetime.date(2025, 12, 1),
+            credenciadoras=["99T"],
+            arranjos=["99T"],
+            vigencia_inicio=datetime.date(2026, 1, 1),
+            vigencia_fim=datetime.date(2026, 6, 30),
+        ))
+        repository.atualizar_status(FINANCIADOR_TESTE, optin["id"], "ATIVO", protocolo_cerc="P-3")
 
-    conflito = repository.existe_optin_ativo_equivalente(
-        FINANCIADOR_TESTE,
-        documento_ufr=DOC_UFR,
-        documento_titular=DOC_UFR,
-        credenciadoras={"555"},
-        arranjos={"MC"},
-        vigencia_inicio=datetime.date(2026, 8, 1),
-        vigencia_fim=datetime.date(2026, 12, 31),
-    )
-    assert conflito is False
-    _limpar()
+        conflito = repository.existe_optin_ativo_equivalente(
+            FINANCIADOR_TESTE,
+            documento_ufr=DOC_UFR,
+            documento_titular=DOC_UFR,
+            credenciadoras={"555"},
+            arranjos={"MC"},
+            vigencia_inicio=datetime.date(2026, 8, 1),
+            vigencia_fim=datetime.date(2026, 12, 31),
+        )
+        assert conflito is False
+    finally:
+        _limpar()
 
 
 def test_listar_filtra_por_status():
