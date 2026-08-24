@@ -82,3 +82,40 @@ def validar_credenciadoras(lista: list) -> None:
         raise ValidationError("VAL006", "lista de credenciadoras vazia")
     if "99T" in lista and len(lista) > 1:
         raise ValidationError("VAL007", "mistura de 99T com CNPJs específicos na mesma lista")
+
+
+def conjuntos_se_sobrepoem(a: set, b: set) -> bool:
+    """Compara dois conjuntos (credenciadoras ou arranjos) tratando '99T' como
+    curinga universal (SPEC-01 §2.3/§5.6): se qualquer lado contiver '99T',
+    há sobreposição total."""
+    if "99T" in a or "99T" in b:
+        return True
+    return bool(a & b)
+
+
+def vigencias_se_sobrepoem(inicio_a, fim_a, inicio_b, fim_b) -> bool:
+    """Interseção de intervalos fechados [inicio, fim] (SPEC-01 §5.6)."""
+    return inicio_a <= fim_b and inicio_b <= fim_a
+
+
+def mascarar_documento(documento: str) -> str:
+    """SPEC-01 §8: documentos mascarados em log (ex.: '12345678****99')."""
+    if len(documento) <= 4:
+        return "*" * len(documento)
+    if len(documento) <= 6:
+        return documento[:2] + "*" * (len(documento) - 2)
+    return documento[:8] + "*" * (len(documento) - 10) + documento[-2:]
+
+
+def validar_arranjos(lista: list, ativos: set) -> None:
+    """VAL005 — SPEC-01 §7.1 104015/104016. '99T' sempre aceito sem checar domínio."""
+    for codigo in lista:
+        if codigo != "99T" and codigo not in ativos:
+            raise ValidationError("VAL005", f"arranjo fora do domínio vigente: {codigo}")
+
+
+def validar_evidencia(evidencia_id) -> None:
+    """VAL008 — só a presença é verificada aqui; acessibilidade do storage de
+    evidências fica fora de escopo (não há storage especificado na SPEC-01)."""
+    if not evidencia_id:
+        raise ValidationError("VAL008", "evidenciaAutorizacaoId ausente")
