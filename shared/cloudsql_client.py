@@ -47,6 +47,14 @@ class QueryBuilder:
         self._filters.append(("eq", field, value))
         return self
 
+    def gte(self, field: str, value: Any) -> "QueryBuilder":
+        self._filters.append(("gte", field, value))
+        return self
+
+    def lte(self, field: str, value: Any) -> "QueryBuilder":
+        self._filters.append(("lte", field, value))
+        return self
+
     def order(self, field: str, desc: bool = False) -> "QueryBuilder":
         self._order_by.append((field, desc))
         return self
@@ -85,11 +93,11 @@ class QueryBuilder:
         if not self._filters:
             return "", {}
         clauses, params = [], {}
+        operadores = {"eq": "=", "gte": ">=", "lte": "<="}
         for i, (op, field, val) in enumerate(self._filters):
             pname = f"p{i}"
-            if op == "eq":
-                clauses.append(f"{field} = :{pname}")
-                params[pname] = val
+            clauses.append(f"{field} {operadores[op]} :{pname}")
+            params[pname] = val
         return "WHERE " + " AND ".join(clauses), params
 
     @staticmethod

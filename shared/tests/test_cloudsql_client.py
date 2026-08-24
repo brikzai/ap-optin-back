@@ -114,3 +114,33 @@ def test_get_db_single_flight_on_concurrent_first_access(monkeypatch):
 
     cloudsql_client_module._clients.pop(FINANCIADOR_TESTE_3, None)
     cloudsql_client_module._locks.pop(FINANCIADOR_TESTE_3, None)
+
+
+def test_gte_lte_filters_range_query():
+    db = get_db(FINANCIADOR_TESTE)
+    db.table("dominio_arranjo").delete().eq("codigo", "GTE1").execute()
+    db.table("dominio_arranjo").delete().eq("codigo", "GTE2").execute()
+    try:
+        db.table("dominio_arranjo").insert({
+            "codigo": "GTE1", "descricao": "A", "ativo": True,
+            "atualizado_em": "2026-01-01T00:00:00-03:00",
+        }).execute()
+        db.table("dominio_arranjo").insert({
+            "codigo": "GTE2", "descricao": "B", "ativo": True,
+            "atualizado_em": "2026-06-01T00:00:00-03:00",
+        }).execute()
+
+        recentes = db.table("dominio_arranjo").select("*").gte(
+            "atualizado_em", "2026-03-01T00:00:00-03:00"
+        ).eq("ativo", True).execute()
+        codigos = {r["codigo"] for r in recentes.data}
+        assert "GTE2" in codigos and "GTE1" not in codigos
+
+        antigos = db.table("dominio_arranjo").select("*").lte(
+            "atualizado_em", "2026-03-01T00:00:00-03:00"
+        ).eq("ativo", True).execute()
+        codigos_antigos = {r["codigo"] for r in antigos.data}
+        assert "GTE1" in codigos_antigos and "GTE2" not in codigos_antigos
+    finally:
+        db.table("dominio_arranjo").delete().eq("codigo", "GTE1").execute()
+        db.table("dominio_arranjo").delete().eq("codigo", "GTE2").execute()
