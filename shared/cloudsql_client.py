@@ -1,17 +1,19 @@
 """Cliente Cloud SQL — API estilo Supabase/PostgREST sobre SQLAlchemy.
 
-    get_db().table("optin").select("*").eq("status", "ATIVO").limit(10).execute()
-    get_db().table("optin").insert({...}).execute()
+    get_db(financiador_id).table("optin").select("*").eq("status", "ATIVO").limit(10).execute()
+    get_db(financiador_id).table("optin").insert({...}).execute()
 
 Sem Django ORM (design §2/§3): DATABASES={} no settings, todo acesso passa
-por aqui. Conecta a Postgres local via LOCAL_DATABASE_URL (dev/test) ou a
-Cloud SQL via Connector (CLOUDSQL_CONNECTION_NAME) em produção/homolog.
+por aqui. Um Cloud SQL (banco) por tenant/financiador — a config de conexão
+vem de shared.tenant_config.get_tenant_config, e o CloudSQLClient resultante
+é cacheado em memória por financiador_id (ver §3).
 """
 
 import json
 import logging
-import os
 from typing import Any, List, Optional
+
+from shared.tenant_config import get_tenant_config
 
 logger = logging.getLogger(__name__)
 
@@ -173,45 +175,37 @@ class CloudSQLClient:
         return QueryBuilder(self._engine, name)
 
 
-def _create_engine():
+def _create_engine(config: dict):
     import sqlalchemy
-
-    local_url = os.getenv("LOCAL_DATABASE_URL")
-    if local_url:
-        logger.info("[CloudSQL] Engine LOCAL via LOCAL_DATABASE_URL")
-        return sqlalchemy.create_engine(local_url, pool_pre_ping=True)
-
-    connection_name = os.getenv("CLOUDSQL_CONNECTION_NAME")
-    if not connection_name:
-        return None
-
     from google.cloud.sql.connector import Connector, IPTypes
 
     connector = Connector()
-    db_user = os.getenv("CLOUDSQL_DB_USER", "postgres")
-    db_pass = os.getenv("CLOUDSQL_DB_PASSWORD", "")
-    db_name = os.getenv("CLOUDSQL_DB_NAME", "postgres")
 
     def getconn():
         return connector.connect(
-            connection_name, "pg8000", user=db_user, password=db_pass, db=db_name, ip_type=IPTypes.PUBLIC,
+            config["cloudsql_connection_name"],
+            "pg8000",
+            user=config["cloudsql_db_user"],
+            password=config["cloudsql_db_password"],
+            db=config["cloudsql_db_name"],
+            ip_type=IPTypes.PUBLIC,
         )
 
-    logger.info("[CloudSQL] Engine criado para %s", connection_name)
+    logger.info("[CloudSQL] Engine criado para tenant (connection=%s)", config["cloudsql_connection_name"])
     return sqlalchemy.create_engine(
         "postgresql+pg8000://", creator=getconn, pool_size=5, max_overflow=2, pool_timeout=30, pool_recycle=1800,
     )
 
 
-_client: Optional[CloudSQLClient] = None
+_clients: dict = {}
 
 
-def get_db() -> Optional[CloudSQLClient]:
-    global _client
-    if _client is not None:
-        return _client
-    engine = _create_engine()
-    if engine is None:
-        return None
-    _client = CloudSQLClient(engine)
-    return _client
+def get_db(financiador_id: str) -> CloudSQLClient:
+    if financiador_id in _clients:
+        return _clients[financiador_id]
+
+    config = get_tenant_config(financiador_id)
+    engine = _create_engine(config)
+    client = CloudSQLClient(engine)
+    _clients[financiador_id] = client
+    return client
