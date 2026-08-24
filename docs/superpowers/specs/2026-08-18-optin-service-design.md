@@ -30,12 +30,13 @@ optin/
 │       ├── views.py              # API interna (§5) + webhook receptor CERC (§4.4) + push endpoint Pub/Sub
 │       ├── urls.py
 │       ├── validation.py         # R1-R8, VAL001-010, anti-duplicidade §5.6
-│       └── management/commands/  # retry_envio, expirar_optins, fechar_consultas_agenda,
+│       └── management/commands/  # retry_envio, expirar_optins,
 │                                  # sincronizar_dominio_arranjo, reconciliacao_diaria
 ├── services/
 │   └── cerc/
 │       ├── token_provider.py     # OAuth2 client-credentials, cache 80% de expires_in, single-flight
-│       └── client.py             # registrar_optin / atualizar_optin / encerrar_optin / consultar_agenda
+│       └── client.py             # registrar_optin / atualizar_optin / encerrar_optin
+│                                  # (consultar_agenda fica para o plano da SPEC-03)
 └── shared/
     ├── cloudsql_client.py        # QueryBuilder (adaptado do padrão da casa; sem dependência cruzada de repo)
     ├── jwt_auth.py                # middleware JWT do IdP corporativo (API interna)
@@ -52,7 +53,7 @@ Decisões YAGNI explícitas (descartadas em favor de simplicidade, revisitar só
 
 ## 3. Camada de dados
 
-- Tabelas do §6 da SPEC-01 (`optin`, `optin_credenciadora`, `optin_arranjo`, `optout`, `cerc_requisicao`, `webhook_inbox`, `consulta_agenda`, `consulta_agenda_ur`, `dominio_arranjo`) viram `docker/initdb/01-optin-schema.sql`, copiadas da spec quase literalmente (ela já é DDL Postgres válida).
+- Tabelas do §6 da SPEC-01 usadas por **este** plano (`optin`, `optin_credenciadora`, `optin_arranjo`, `optout`, `cerc_requisicao`, `webhook_inbox`, `dominio_arranjo`) viram `docker/initdb/01-optin-schema.sql`, copiadas da spec quase literalmente (ela já é DDL Postgres válida). `consulta_agenda`/`consulta_agenda_ur` **ficam de fora** — a SPEC-01 §4.3/§5.5 diz explicitamente que a consulta de agenda foi movida para a SPEC 03; criar essas tabelas agora seria schema sem nenhum código que as use (YAGNI).
 - Instância Cloud SQL dedicada a este serviço; schema único (`public`), sem necessidade de multi-schema já que não há outro serviço gravando na mesma instância.
 - Tipos monetários: `NUMERIC(18,2)` no Postgres, `decimal.Decimal` em Python. **Proibido `float`/`double`** em qualquer campo de valor (requisito explícito da SPEC-01, verificado estaticamente conforme §11.4).
 - Auditoria (§8 da SPEC-01): sem tabela nova — cabe em `cerc_requisicao` (trilha de chamadas) + evento de auditoria gravado em Python (`validation.py`/`views.py`, não trigger de banco) a cada registro/alteração/encerramento de opt-in, com diff de campos.
@@ -76,8 +77,9 @@ Decisões YAGNI explícitas (descartadas em favor de simplicidade, revisitar só
 - **Jobs periódicos** (Cloud Scheduler → endpoint HTTP interno protegido por OIDC):
   - `retry_envio` — opt-ins `PENDENTE` > 1h e `FALHA_ENVIO` elegíveis a reenvio (backoff já resolvido pela política de retentativa da SPEC-01 §9.2).
   - `expirar_optins` — diário, 00:15 America/Sao_Paulo (SPEC-01 §9.1).
-  - `fechar_consultas_agenda` — cadência curta (~30-60s); aplica quiet period de 90s e hard timeout de 15min (SPEC-01 §9.3).
   - `sincronizar_dominio_arranjo` — diário.
+
+  (`fechar_consultas_agenda`, quiet period de 90s e hard timeout de 15min — SPEC-01 §9.3 — ficam para o plano da SPEC-03, junto com a consulta de agenda.)
 - **Reconciliação diária completa** (SPEC-01 §9.4): único job que roda como **Cloud Run Job** dedicado (não endpoint HTTP), disparado pelo Cloud Scheduler via Admin API (`jobs.run`) — evita competir por worker com o tráfego web durante uma comparação potencialmente pesada.
 - **Deploy:** Cloud Run + `cloudbuild.yaml`, mesmo molde dos repos irmãos.
 
