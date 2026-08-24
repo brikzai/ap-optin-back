@@ -24,6 +24,7 @@ def _reset_cache_and_env(monkeypatch):
     import shared.tenant_config as tenant_config_module
     tenant_config_module._cache.clear()
     yield
+    tenant_config_module._cache.clear()
 
 
 @respx.mock
