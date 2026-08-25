@@ -16,6 +16,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "corsheaders",
     "apps.optin",
+    "apps.cliente",
 ]
 
 MIDDLEWARE = [
