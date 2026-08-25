@@ -92,6 +92,23 @@ def test_listar_clientes_filtra_por_documento(client, auth_headers):
         _limpar()
 
 
+def test_listar_clientes_filtra_por_documento_mascarado(client, auth_headers):
+    _limpar()
+    try:
+        criado_resp = client.post(
+            "/api/v1/clientes", data=json.dumps(CORPO_VALIDO), content_type="application/json", **auth_headers,
+        )
+        criado = json.loads(criado_resp.content)
+
+        documento_mascarado = "22.751.826/0001-25"
+        response = client.get(f"/api/v1/clientes?documento={documento_mascarado}", **auth_headers)
+        assert response.status_code == 200
+        ids = [item["id"] for item in json.loads(response.content)["dados"]]
+        assert criado["id"] in ids
+    finally:
+        _limpar()
+
+
 def test_detalhar_cliente_retorna_200(client, auth_headers):
     _limpar()
     try:

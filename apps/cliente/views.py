@@ -3,7 +3,7 @@ import json
 from django.http import JsonResponse
 
 from apps.cliente import repository
-from apps.optin.validation import ValidationError, validar_documento
+from apps.optin.validation import ValidationError, normalizar_documento, validar_documento
 from shared.jwt_auth import jwt_required
 
 
@@ -54,7 +54,14 @@ def criar_cliente(request):
 
 @jwt_required
 def listar_clientes(request):
-    filtros = {"documento": request.GET.get("documento")}
+    documento_raw = request.GET.get("documento")
+    documento_filtro = documento_raw
+    if documento_raw:
+        try:
+            documento_filtro = normalizar_documento(documento_raw)
+        except ValidationError:
+            pass
+    filtros = {"documento": documento_filtro}
     limit = min(int(request.GET.get("limit", 50)), 200)
     resultado = repository.listar(request.financiador_id, filtros, limit)
     return JsonResponse({"dados": [_serializar_cliente(c) for c in resultado]})
