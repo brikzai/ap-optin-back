@@ -6,6 +6,7 @@ CREATE TABLE optin (
   status                TEXT NOT NULL,
   cnpj_solicitante      TEXT NOT NULL,
   cnpj_financiador      TEXT NOT NULL,
+  cliente_id            TEXT NOT NULL REFERENCES cliente(id),
   documento_ufr         TEXT NOT NULL,
   documento_ufr_tipo    TEXT NOT NULL,
   documento_titular     TEXT,
