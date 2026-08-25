@@ -235,9 +235,15 @@ def atualizar_optin_view(request, optin_id):
     if resultado.status_local != "ATIVO":
         return _erro_json(resultado.erro_codigo or "REJEITADO", resultado.erro_mensagem or "atualização rejeitada pela CERC", 422)
 
+    if "arranjos" in payload:
+        repository.atualizar_arranjos(request.financiador_id, optin_id, arranjos)
+    if "credenciadoras" in payload:
+        repository.atualizar_credenciadoras(request.financiador_id, optin_id, credenciadoras)
+
     optin_final = repository.atualizar_campos(request.financiador_id, optin_id, {
         "vigencia_fim": vigencia_fim,
         "carteira": payload.get("carteira", optin.get("carteira")),
+        "cnpj_financiador": payload.get("cnpjFinanciador", optin["cnpj_financiador"]),
     })
     return JsonResponse(_serializar_optin(optin_final))
 

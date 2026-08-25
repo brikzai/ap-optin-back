@@ -112,6 +112,18 @@ def atualizar_campos(financiador_id: str, optin_id: str, dados: dict) -> dict:
     return _com_filhas(financiador_id, resultado.data[0])
 
 
+def atualizar_arranjos(financiador_id: str, optin_id: str, arranjos: list) -> None:
+    get_db(financiador_id).table("optin_arranjo").delete().eq("optin_id", optin_id).execute()
+    for codigo in arranjos:
+        get_db(financiador_id).table("optin_arranjo").insert({"optin_id": optin_id, "codigo": codigo}).execute()
+
+
+def atualizar_credenciadoras(financiador_id: str, optin_id: str, credenciadoras: list) -> None:
+    get_db(financiador_id).table("optin_credenciadora").delete().eq("optin_id", optin_id).execute()
+    for cnpj in credenciadoras:
+        get_db(financiador_id).table("optin_credenciadora").insert({"optin_id": optin_id, "cnpj": cnpj}).execute()
+
+
 def listar(financiador_id: str, filtros: dict, limit: int) -> list:
     query = get_db(financiador_id).table("optin").select("*")
     for campo in ("status", "documento_ufr", "origem", "carteira"):
