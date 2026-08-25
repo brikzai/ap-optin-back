@@ -14,10 +14,12 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.auth",
     "rest_framework",
+    "corsheaders",
     "apps.optin",
 ]
 
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
 ]
 
@@ -46,3 +48,11 @@ LOGGING = {
     "handlers": {"console": {"class": "logging.StreamHandler", "formatter": "standard"}},
     "root": {"handlers": ["console"], "level": "INFO"},
 }
+
+# CORS — origens da SPA que consome esta API (ap-front). Config direta via
+# env var (não é segredo, não passa por shared/secrets.py — mesmo padrão já
+# usado para ALLOWED_HOSTS acima).
+from corsheaders.defaults import default_headers
+
+CORS_ALLOWED_ORIGINS = [o for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o]
+CORS_ALLOW_HEADERS = list(default_headers) + ["idempotency-key"]
