@@ -4,6 +4,7 @@ import logging
 
 from django.http import JsonResponse
 
+from apps.cliente import repository as cliente_repository
 from apps.optin import repository
 from apps.optin.cerc_mapping import correlacionar_por_referencia, interpretar_item_opt_in
 from apps.optin.idempotency import idempotente
@@ -38,6 +39,8 @@ def _serializar_optin(optin: dict) -> dict:
         "protocoloCerc": optin.get("protocolo_cerc"),
         "origem": optin["origem"],
         "status": optin["status"],
+        "clienteId": optin["cliente_id"],
+        "clienteNome": optin.get("cliente_nome"),
         "cnpjSolicitante": optin["cnpj_solicitante"],
         "cnpjFinanciador": optin["cnpj_financiador"],
         "usuarioFinalRecebedor": optin["documento_ufr"],
@@ -60,9 +63,18 @@ def criar_optin(request):
     except json.JSONDecodeError:
         return _erro_json("JSON_INVALIDO", "corpo da requisição não é JSON válido", 400)
 
+    cliente_id = payload.get("clienteId")
+    if not cliente_id:
+        return _erro_json("CLI002", "clienteId é obrigatório", 422)
+
+    cliente = cliente_repository.buscar_por_id(request.financiador_id, cliente_id)
+    if cliente is None:
+        return _erro_json("CLIENTE_NAO_ENCONTRADO", "cliente não encontrado", 404)
+
+    documento_ufr, tipo_ufr = cliente["documento"], cliente["documento_tipo"]
+
     try:
-        documento_ufr, tipo_ufr = validar_documento(payload.get("usuarioFinalRecebedor", ""))
-        titular_raw = payload.get("titular") or payload.get("usuarioFinalRecebedor", "")
+        titular_raw = payload.get("titular") or documento_ufr
         documento_titular, _ = validar_documento(titular_raw)
 
         credenciadoras = payload.get("credenciadoras") or []
@@ -88,6 +100,7 @@ def criar_optin(request):
     cnpj_solicitante = get_tenant_config(request.financiador_id)["cerc_cnpj_solicitante"]
 
     optin = repository.criar_optin_pendente(request.financiador_id, {
+        "cliente_id": cliente["id"],
         "cnpj_solicitante": cnpj_solicitante,
         "cnpj_financiador": request.financiador_id,
         "documento_ufr": documento_ufr,

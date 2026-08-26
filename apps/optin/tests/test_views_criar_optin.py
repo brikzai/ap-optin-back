@@ -6,12 +6,13 @@ import respx
 from dotenv import load_dotenv
 load_dotenv()
 
+from apps.cliente import repository as cliente_repository
 from shared.cloudsql_client import get_db
 
 DOC_UFR = "22751826000125"
 FINANCIADOR_TESTE = "12345678000199"
+
 CORPO_VALIDO = {
-    "usuarioFinalRecebedor": DOC_UFR,
     "credenciadoras": ["99T"],
     "arranjos": ["VCC"],
     "vigenciaInicio": "2026-08-11",
@@ -19,6 +20,20 @@ CORPO_VALIDO = {
     "dataAssinatura": "2026-08-10",
     "evidenciaAutorizacaoId": "doc_teste",
 }
+
+
+def _cliente_id_teste():
+    existente = cliente_repository.buscar_por_documento(FINANCIADOR_TESTE, DOC_UFR)
+    if existente:
+        return existente["id"]
+    return cliente_repository.criar(FINANCIADOR_TESTE, {
+        "documento": DOC_UFR, "documento_tipo": "CNPJ", "nome": "Cliente Teste",
+        "email": None, "telefone": None,
+    })["id"]
+
+
+def _corpo_valido(**overrides):
+    return {**CORPO_VALIDO, "clienteId": _cliente_id_teste(), **overrides}
 
 
 def _limpar():
@@ -71,7 +86,7 @@ def test_criar_optin_sucesso_retorna_201_ativo(client, auth_headers):
 
     response = client.post(
         "/api/v1/optins",
-        data=json.dumps(CORPO_VALIDO),
+        data=json.dumps(_corpo_valido()),
         content_type="application/json",
         HTTP_IDEMPOTENCY_KEY="key-criar-1",
         **auth_headers,
@@ -85,20 +100,20 @@ def test_criar_optin_sucesso_retorna_201_ativo(client, auth_headers):
 
 
 def test_criar_optin_sem_jwt_retorna_401(client):
-    response = client.post("/api/v1/optins", data=json.dumps(CORPO_VALIDO), content_type="application/json")
+    response = client.post("/api/v1/optins", data=json.dumps(_corpo_valido()), content_type="application/json")
     assert response.status_code == 401
 
 
 def test_criar_optin_sem_idempotency_key_retorna_422(client, auth_headers):
     response = client.post(
-        "/api/v1/optins", data=json.dumps(CORPO_VALIDO), content_type="application/json", **auth_headers
+        "/api/v1/optins", data=json.dumps(_corpo_valido()), content_type="application/json", **auth_headers
     )
     assert response.status_code == 422
     assert json.loads(response.content)["erro"] == "VAL011"
 
 
 def test_criar_optin_vigencia_invalida_retorna_422(client, auth_headers):
-    corpo = {**CORPO_VALIDO, "vigenciaFim": "2026-01-01"}
+    corpo = _corpo_valido(vigenciaFim="2026-01-01")
     response = client.post(
         "/api/v1/optins",
         data=json.dumps(corpo),
@@ -124,14 +139,16 @@ def test_criar_optin_duplicado_retorna_409_sem_chamar_cerc(client, auth_headers)
 
     rota_cerc = respx.post("https://ap-homolog.cerc.inf.br/opt_in").mock(side_effect=_resposta)
 
+    corpo = _corpo_valido()
+
     client.post(
-        "/api/v1/optins", data=json.dumps(CORPO_VALIDO), content_type="application/json",
+        "/api/v1/optins", data=json.dumps(corpo), content_type="application/json",
         HTTP_IDEMPOTENCY_KEY="key-dup-1", **auth_headers,
     )
     chamadas_apos_primeira = rota_cerc.call_count
 
     response = client.post(
-        "/api/v1/optins", data=json.dumps(CORPO_VALIDO), content_type="application/json",
+        "/api/v1/optins", data=json.dumps(corpo), content_type="application/json",
         HTTP_IDEMPOTENCY_KEY="key-dup-2", **auth_headers,
     )
 
@@ -150,7 +167,7 @@ def test_criar_optin_falha_transporte_cerc_retorna_502_e_marca_falha_envio(clien
         respx.post("https://ap-homolog.cerc.inf.br/opt_in").mock(side_effect=httpx.ConnectError("connection refused"))
 
         response = client.post(
-            "/api/v1/optins", data=json.dumps(CORPO_VALIDO), content_type="application/json",
+            "/api/v1/optins", data=json.dumps(_corpo_valido()), content_type="application/json",
             HTTP_IDEMPOTENCY_KEY=chave, **auth_headers,
         )
 
@@ -184,7 +201,7 @@ def test_criar_optin_rejeitado_pela_cerc_retorna_422_e_marca_rejeitado(client, a
         respx.post("https://ap-homolog.cerc.inf.br/opt_in").mock(side_effect=_resposta)
 
         response = client.post(
-            "/api/v1/optins", data=json.dumps(CORPO_VALIDO), content_type="application/json",
+            "/api/v1/optins", data=json.dumps(_corpo_valido()), content_type="application/json",
             HTTP_IDEMPOTENCY_KEY=chave, **auth_headers,
         )
 

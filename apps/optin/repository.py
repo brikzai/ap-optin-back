@@ -23,6 +23,8 @@ def _com_filhas(financiador_id: str, optin: dict) -> dict:
     optin["arranjos"] = [
         r["codigo"] for r in get_db(financiador_id).table("optin_arranjo").select("codigo").eq("optin_id", optin_id).execute().data
     ]
+    cliente_rows = get_db(financiador_id).table("cliente").select("nome").eq("id", optin["cliente_id"]).execute().data
+    optin["cliente_nome"] = cliente_rows[0]["nome"] if cliente_rows else None
     return optin
 
 
@@ -34,11 +36,11 @@ def criar_optin_pendente(financiador_id: str, dados: dict) -> dict:
         conn.execute(sqlalchemy.text("""
             INSERT INTO optin (
                 id, referencia_externa, origem, status, cnpj_solicitante, cnpj_financiador,
-                documento_ufr, documento_ufr_tipo, documento_titular, data_assinatura,
+                cliente_id, documento_ufr, documento_ufr_tipo, documento_titular, data_assinatura,
                 vigencia_inicio, vigencia_fim, carteira, evidencia_id
             ) VALUES (
                 :id, :referencia_externa, 'OPTIN', 'PENDENTE', :cnpj_solicitante, :cnpj_financiador,
-                :documento_ufr, :documento_ufr_tipo, :documento_titular, :data_assinatura,
+                :cliente_id, :documento_ufr, :documento_ufr_tipo, :documento_titular, :data_assinatura,
                 :vigencia_inicio, :vigencia_fim, :carteira, :evidencia_id
             )
         """), {
@@ -46,6 +48,7 @@ def criar_optin_pendente(financiador_id: str, dados: dict) -> dict:
             "referencia_externa": referencia_externa,
             "cnpj_solicitante": dados["cnpj_solicitante"],
             "cnpj_financiador": dados["cnpj_financiador"],
+            "cliente_id": dados["cliente_id"],
             "documento_ufr": dados["documento_ufr"],
             "documento_ufr_tipo": dados["documento_ufr_tipo"],
             "documento_titular": dados["documento_titular"],
