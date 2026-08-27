@@ -16,6 +16,8 @@ CREATE TABLE optin (
   carteira              TEXT,
   evidencia_id          TEXT NOT NULL,
   contrato_id           TEXT,
+  erro_codigo           TEXT,
+  erro_mensagem         TEXT,
   criado_em             TIMESTAMPTZ NOT NULL DEFAULT now(),
   atualizado_em         TIMESTAMPTZ NOT NULL DEFAULT now(),
   CHECK (vigencia_fim >= vigencia_inicio),

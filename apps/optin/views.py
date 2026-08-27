@@ -39,6 +39,7 @@ def _serializar_optin(optin: dict) -> dict:
         "protocoloCerc": optin.get("protocolo_cerc"),
         "origem": optin["origem"],
         "status": optin["status"],
+        "errosCerc": [{"codigo": optin["erro_codigo"], "mensagem": optin["erro_mensagem"]}] if optin.get("erro_codigo") else [],
         "clienteId": optin["cliente_id"],
         "clienteNome": optin.get("cliente_nome"),
         "cnpjSolicitante": optin["cnpj_solicitante"],
@@ -138,7 +139,10 @@ def criar_optin(request):
     try:
         resposta = registrar_optin(request.financiador_id, payload_cerc, correlacao_id=optin["referencia_externa"])
     except Exception as exc:  # noqa: BLE001 - transporte (httpx) e negócio (CercApiError) tratados juntos aqui; classificação fina retentável/não-retentável (§9.2) fica no job de reconciliação, fora de escopo
-        repository.atualizar_status(request.financiador_id, optin["id"], "FALHA_ENVIO")
+        repository.atualizar_status(
+            request.financiador_id, optin["id"], "FALHA_ENVIO",
+            erro_codigo="CERC_INDISPONIVEL", erro_mensagem=str(exc),
+        )
         logger.warning("falha ao enviar optin %s para CERC: %s", optin["referencia_externa"], exc)
         return _erro_json("CERC_INDISPONIVEL", "falha ao registrar opt-in na CERC", 502)
 
@@ -149,7 +153,10 @@ def criar_optin(request):
         optin_final = repository.atualizar_status(request.financiador_id, optin["id"], "ATIVO", protocolo_cerc=resultado.protocolo)
         return JsonResponse(_serializar_optin(optin_final), status=201)
 
-    repository.atualizar_status(request.financiador_id, optin["id"], "REJEITADO")
+    repository.atualizar_status(
+        request.financiador_id, optin["id"], "REJEITADO",
+        erro_codigo=resultado.erro_codigo, erro_mensagem=resultado.erro_mensagem,
+    )
     return _erro_json(resultado.erro_codigo or "REJEITADO", resultado.erro_mensagem or "opt-in rejeitado pela CERC", 422)
 
 
