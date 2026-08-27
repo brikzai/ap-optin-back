@@ -121,6 +121,12 @@ def test_atualizar_altera_campos_e_marca_atualizado_em():
         _limpar()
 
 
+def test_atualizar_retorna_none_quando_nao_existe():
+    from apps.cliente import repository
+
+    assert repository.atualizar(FINANCIADOR_TESTE, "cli_inexistente", {"nome": "X"}) is None
+
+
 def test_atualizar_so_grava_campos_presentes_no_dict():
     from apps.cliente import repository
 

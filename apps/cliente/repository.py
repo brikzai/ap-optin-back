@@ -24,7 +24,7 @@ def criar(financiador_id: str, dados: dict) -> dict:
 def atualizar(financiador_id: str, cliente_id: str, dados: dict) -> dict:
     campos = {**dados, "atualizado_em": timezone.now()}
     resultado = get_db(financiador_id).table("cliente").update(campos).eq("id", cliente_id).execute()
-    return resultado.data[0]
+    return resultado.data[0] if resultado.data else None
 
 
 def buscar_por_documento(financiador_id: str, documento: str):

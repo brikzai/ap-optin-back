@@ -99,6 +99,9 @@ def atualizar_cliente(request, cliente_id):
     if status is not None and status not in STATUS_VALIDOS:
         return _erro_json("CLI003", "status inválido", 422)
 
+    if "nome" in payload and not payload["nome"]:
+        return _erro_json("CLI001", "nome é obrigatório", 422)
+
     campos = {}
     for chave in ("nome", "email", "telefone", "status"):
         if chave in payload:

@@ -230,6 +230,25 @@ def test_atualizar_cliente_status_invalido_retorna_422(client, auth_headers):
         _limpar()
 
 
+def test_atualizar_cliente_nome_vazio_retorna_422(client, auth_headers):
+    _limpar()
+    try:
+        criado = json.loads(client.post(
+            "/api/v1/clientes", data=json.dumps(CORPO_VALIDO), content_type="application/json", **auth_headers,
+        ).content)
+
+        response = client.patch(
+            f"/api/v1/clientes/{criado['id']}",
+            data=json.dumps({"nome": ""}),
+            content_type="application/json",
+            **auth_headers,
+        )
+        assert response.status_code == 422
+        assert json.loads(response.content)["erro"] == "CLI001"
+    finally:
+        _limpar()
+
+
 def test_atualizar_cliente_corpo_vazio_nao_muda_nada(client, auth_headers):
     _limpar()
     try:
