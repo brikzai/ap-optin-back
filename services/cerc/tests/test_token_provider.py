@@ -43,6 +43,28 @@ def test_get_cerc_token_fetches_and_caches():
 
 
 @respx.mock
+def test_get_cerc_token_envia_credenciais_via_basic_auth():
+    # A CERC exige HTTP Basic Auth (client_id:client_secret em base64) no
+    # header Authorization — client_id/client_secret no corpo é rejeitado
+    # com 401 pelo servidor real (verificado manualmente contra homologação).
+    route = respx.post("https://api.int.cerc.com/oauth/token").mock(
+        return_value=httpx.Response(200, json={"access_token": "tok-1", "expires_in": 3600})
+    )
+
+    token_provider.get_cerc_token(FINANCIADOR_TESTE)
+
+    request = route.calls.last.request
+    import base64
+    esperado = "Basic " + base64.b64encode(b"client-123:segredo-local").decode()
+    assert request.headers["authorization"] == esperado
+
+    body = request.content.decode()
+    assert "client_id" not in body
+    assert "client_secret" not in body
+    assert "grant_type=client_credentials" in body
+
+
+@respx.mock
 def test_get_cerc_token_refetches_after_80_percent_expiry():
     respx.post("https://api.int.cerc.com/oauth/token").mock(
         return_value=httpx.Response(200, json={"access_token": "tok-1", "expires_in": 3600})
