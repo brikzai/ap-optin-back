@@ -71,3 +71,69 @@ def test_listar_filtra_por_documento():
         assert vazio == []
     finally:
         _limpar()
+
+
+def test_criar_grava_status_default_pending():
+    from apps.cliente import repository
+
+    _limpar()
+    try:
+        cliente = repository.criar(FINANCIADOR_TESTE, {
+            "documento": DOCUMENTO_TESTE, "documento_tipo": "CNPJ", "nome": "Cliente Teste",
+            "email": None, "telefone": None,
+        })
+        assert cliente["status"] == "pending"
+    finally:
+        _limpar()
+
+
+def test_criar_aceita_status_explicito():
+    from apps.cliente import repository
+
+    _limpar()
+    try:
+        cliente = repository.criar(FINANCIADOR_TESTE, {
+            "documento": DOCUMENTO_TESTE, "documento_tipo": "CNPJ", "nome": "Cliente Teste",
+            "email": None, "telefone": None, "status": "active",
+        })
+        assert cliente["status"] == "active"
+    finally:
+        _limpar()
+
+
+def test_atualizar_altera_campos_e_marca_atualizado_em():
+    from apps.cliente import repository
+
+    _limpar()
+    try:
+        criado = repository.criar(FINANCIADOR_TESTE, {
+            "documento": DOCUMENTO_TESTE, "documento_tipo": "CNPJ", "nome": "Cliente Teste",
+            "email": None, "telefone": None,
+        })
+        atualizado = repository.atualizar(
+            FINANCIADOR_TESTE, criado["id"], {"nome": "Nome Novo", "email": "novo@example.com"}
+        )
+        assert atualizado["nome"] == "Nome Novo"
+        assert atualizado["email"] == "novo@example.com"
+        assert atualizado["telefone"] is None
+        assert atualizado["atualizado_em"] > criado["criado_em"]
+    finally:
+        _limpar()
+
+
+def test_atualizar_so_grava_campos_presentes_no_dict():
+    from apps.cliente import repository
+
+    _limpar()
+    try:
+        criado = repository.criar(FINANCIADOR_TESTE, {
+            "documento": DOCUMENTO_TESTE, "documento_tipo": "CNPJ", "nome": "Cliente Teste",
+            "email": "original@example.com", "telefone": "11888888888",
+        })
+        atualizado = repository.atualizar(FINANCIADOR_TESTE, criado["id"], {"status": "active"})
+        assert atualizado["status"] == "active"
+        assert atualizado["email"] == "original@example.com"
+        assert atualizado["telefone"] == "11888888888"
+        assert atualizado["nome"] == "Cliente Teste"
+    finally:
+        _limpar()
