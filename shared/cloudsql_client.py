@@ -3,10 +3,7 @@
     get_db(financiador_id).table("optin").select("*").eq("status", "ATIVO").limit(10).execute()
     get_db(financiador_id).table("optin").insert({...}).execute()
 
-Sem Django ORM (design §2/§3): DATABASES={} no settings, todo acesso passa
-por aqui. Um Cloud SQL (banco) por tenant/financiador — a config de conexão
-vem de shared.tenant_config.get_tenant_config, e o CloudSQLClient resultante
-é cacheado em memória por financiador_id (ver §3).
+Um banco lógico Postgres por tenant/financiador (ap_<cnpj>) — a config vem de shared.tenant_config.get_tenant_config; o CloudSQLClient é cacheado por financiador_id e validado contra tenant_info (spec 2026-09-02 §5).
 """
 
 import json
@@ -185,7 +182,15 @@ class CloudSQLClient:
 
 
 def _create_engine(config: dict):
+    """Engine por tenant. `database_url` (dev/teste) tem precedência sobre as
+    chaves cloudsql_* (Cloud SQL Connector, homolog/prod). Spec 2026-09-02 §2.2."""
     import sqlalchemy
+
+    database_url = config.get("database_url")
+    if database_url:
+        logger.info("[CloudSQL] Engine por database_url (banco %s)", sqlalchemy.engine.make_url(database_url).database)
+        return sqlalchemy.create_engine(database_url, pool_pre_ping=True)
+
     from google.cloud.sql.connector import Connector, IPTypes
 
     connector = Connector()
