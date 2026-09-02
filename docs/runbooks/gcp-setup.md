@@ -82,3 +82,25 @@ não montados no deploy, então onboardar tenant não exige redeploy.
 Feito em 2026-09-02: par RSA gerado em `keys/homolog/` (gitignorado — **fazer backup da privada fora do
 repo**, ela é quem emite tokens de homolog; perder = gerar par novo e trocar `IAM_JWT_PUBLIC_KEY`).
 Segredos `IAM_JWT_PUBLIC_KEY` e `DJANGO_SECRET_KEY` criados, versão 1 cada.
+
+## 5. Deploy (cloudbuild.yaml)
+
+    gcloud builds submit --config cloudbuild.yaml --substitutions=_TAG=$(git rev-parse --short HEAD)
+
+O que acontece, na ordem: build → push → `gcloud run jobs deploy` de `migrate-tenants` e `optin-manage` →
+`gcloud run jobs execute migrate-tenants --wait` (falhou = build para, revisão antiga segue) → `gcloud run deploy optin-service`.
+Primeiro deploy só depois da seção 6 (segredos do tenant), senão `migrate-tenants` falha por `TENANT_IDS` ausente.
+
+Comandos administrativos em homolog (imagem já deployada):
+
+    gcloud run jobs execute optin-manage --region southamerica-east1 --wait \
+      --args=manage.py,provisionar_tenant,<cnpj>
+    gcloud run jobs execute optin-manage --region southamerica-east1 --wait \
+      --args=manage.py,seed_dominio_arranjo,--tenant,<cnpj>
+
+Logs: `gcloud run jobs executions list --job migrate-tenants --region southamerica-east1` e
+`gcloud logging read 'resource.type="cloud_run_job"' --limit 50`.
+
+Feito em 2026-09-02: `cloudbuild.yaml` escrito e validado (5 steps, 9 substituições) — **ainda não executado**.
+O passo `migrate` falharia por `TENANT_IDS` inexistente; primeiro `gcloud builds submit` real é o Plan 03,
+depois de criar os segredos do primeiro tenant (seção 6, a escrever).
