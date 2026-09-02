@@ -46,3 +46,23 @@ de `ADMIN_DB_CONFIG` **e** de cada `TENANT_<cnpj>_CONFIG`; reiniciar o service (
 
 Feito em 2026-09-02: instância `optin-pg` `RUNNABLE` (`brikz-ap:southamerica-east1:optin-pg`), redes
 autorizadas vazias, usuário `optin_app` criado, segredo `ADMIN_DB_CONFIG` versão 1.
+
+## 3. Service accounts e IAM
+
+    gcloud iam service-accounts create optin-run --display-name="optin-service runtime (Cloud Run service + jobs)"
+    gcloud iam service-accounts create optin-build --display-name="optin-service Cloud Build"
+    for r in roles/cloudsql.client roles/secretmanager.secretAccessor; do
+      gcloud projects add-iam-policy-binding brikz-ap --member=serviceAccount:optin-run@brikz-ap.iam.gserviceaccount.com --role=$r --condition=None
+    done
+    for r in roles/run.admin roles/artifactregistry.writer roles/logging.logWriter roles/cloudbuild.builds.builder; do
+      gcloud projects add-iam-policy-binding brikz-ap --member=serviceAccount:optin-build@brikz-ap.iam.gserviceaccount.com --role=$r --condition=None
+    done
+    gcloud iam service-accounts add-iam-policy-binding optin-run@brikz-ap.iam.gserviceaccount.com \
+      --member=serviceAccount:optin-build@brikz-ap.iam.gserviceaccount.com --role=roles/iam.serviceAccountUser
+
+`optin-run@` não tem nada além de Cloud SQL client e leitura de segredos. Quem roda `gcloud builds submit`
+precisa poder subir o fonte para o bucket de staging (owner/editor do projeto serve).
+
+Feito em 2026-09-02: `optin-run@brikz-ap.iam.gserviceaccount.com` (cloudsql.client, secretmanager.secretAccessor);
+`optin-build@brikz-ap.iam.gserviceaccount.com` (run.admin, artifactregistry.writer, logging.logWriter,
+cloudbuild.builds.builder) + serviceAccountUser sobre `optin-run@`.
