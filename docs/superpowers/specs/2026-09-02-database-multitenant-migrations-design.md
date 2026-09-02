@@ -19,7 +19,8 @@
 |---|---|---|
 | Isolamento | **Um banco lógico Postgres por tenant** (`CREATE DATABASE`), numa **única instância Cloud SQL** | *RLS em banco compartilhado:* complexidade e risco de vazamento sem ganho com 6 tenants. *Instância por tenant:* custo ×6 sem exigência contratual hoje. Se um financiador exigir infra dedicada, o tenant é promovido a instância própria mudando só a config (`cloudsql_connection_name`) — sem mudar código. |
 | Acesso a dados | **Sem Django ORM** — mantém `shared/cloudsql_client.py` (`QueryBuilder` + SQL parametrizado via SQLAlchemy Core/pg8000) | *Django ORM com router por contextvar:* tecnicamente viável e seguro, mas este seria o **único de cinco repos** do mesmo time com ORM. Verificado em disco em 2026-09-02: `etl-back-ingestion-main`, `etl-back-elegibility`, `ap-back-consulta-agenda`, `ap-back-contratos` — todos `DATABASES = {}`, sem `models.py`, sem `migrations/`. *SQLAlchemy ORM + Alembic:* mesma divergência; revisitar só se a SPEC-03 (agenda/URs) trouxer modelo relacional bem mais denso. |
-| Migrations | **SQL puro versionado + runner próprio por tenant** (`migrate_tenants`) | *Nenhuma ferramenta (estado anterior):* `ALTER TABLE` na mão, repetido por tenant, sem controle de versão — foi a dor concreta nº 1. *Alembic:* framework a mais para ~60 linhas de runner. |
+| Migrations | **SQL puro versionado + runner próprio por tenant** (`migrate_tenants`), alinhado ao `scripts/apply_schema.py` que `ap-back-consulta-agenda` e `ap-back-contratos` já usam (ledger `schema_aplicado` com checksum) | *Nenhuma ferramenta (estado anterior):* `ALTER TABLE` na mão, repetido por tenant, sem controle de versão — foi a dor concreta nº 1. *Alembic:* framework a mais para ~60 linhas de runner. |
+| Infra GCP | **Projeto novo por ambiente** (`ap-optin-homolog` agora, `ap-optin-prod` depois), região `southamerica-east1`, provisionado por runbook `gcloud` executado via CLI (§10) | *Reaproveitar `registradora-506000`:* descartado — o recomeço inclui a infra, separada do projeto antigo. *Um projeto para homolog+prod:* mistura credenciais reais da CERC com as de homolog. *Terraform:* nenhum irmão usa; YAGNI para 1 projeto e meia dúzia de recursos. |
 | Garantia de isolamento | **Estrutural, em runtime** (`tenant_info` validado por `get_db`) | *Disciplina no `.env`/Secret Manager (estado anterior):* causou incidente real — dois tenants no mesmo banco, suíte de testes apagou opt-ins reais. |
 | Testes | **Postgres local via Docker**, mesmo runner de migrations | *Cloud SQL real do tenant de dev (estado anterior):* lento, custa, e foi o vetor do incidente acima. |
 
@@ -101,14 +102,17 @@ db/
 
 ### 4.2 Tabela de controle (por banco)
 
+Mesmo nome e semântica do ledger que `ap-back-consulta-agenda`/`ap-back-contratos` já usam em `scripts/apply_schema.py`:
+
 ```sql
-CREATE TABLE IF NOT EXISTS schema_migrations (
-  versao      TEXT PRIMARY KEY,          -- ex.: '0001_baseline'
-  aplicada_em TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE IF NOT EXISTS schema_aplicado (
+  arquivo     TEXT PRIMARY KEY,          -- ex.: '0001_baseline.sql'
+  checksum    TEXT NOT NULL,             -- sha256 do conteúdo
+  aplicado_em TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
 
-Criada pelo próprio runner na primeira execução (bootstrap).
+Criada pelo próprio runner na primeira execução (bootstrap). Arquivo já aplicado com checksum diferente → **erro** ("arquivo aplicado foi editado; crie um novo numerado"). A fonte da verdade é o disco, não o banco.
 
 ### 4.3 Comportamento
 
@@ -118,9 +122,9 @@ Para cada tenant em `TENANT_IDS` (ou só o `--tenant`):
 
 1. Carrega config, cria engine interno (sem cache do `get_db`).
 2. Verifica `tenant_info.financiador_id == cnpj` — divergência aborta **esse tenant** e continua os demais, saindo com código ≠ 0 no fim.
-3. Garante `schema_migrations`.
-4. Lista arquivos em `db/migrations/`, ordena, subtrai os já registrados.
-5. Para cada pendente, **em uma transação**: executa todos os statements, insere em `schema_migrations`, commit. Falha → rollback daquele arquivo, aborta esse tenant, continua os demais.
+3. Garante `schema_aplicado`.
+4. Lista arquivos em `db/migrations/`, ordena; para cada um já registrado, confere o checksum (divergência aborta esse tenant); subtrai os já aplicados.
+5. Para cada pendente, **em uma transação**: executa todos os statements, insere em `schema_aplicado`, commit. Falha → rollback daquele arquivo, aborta esse tenant, continua os demais.
 6. `--dry-run` só imprime o que seria aplicado por tenant.
 
 Log por tenant: `[migrate] ap_<cnpj>: 0002_x aplicada` / `nada pendente`.
@@ -168,7 +172,7 @@ Copiado dos arquivos atuais da worktree (`00-cliente.sql`, `01-optin-schema.sql`
 6. `idempotency_key` — PK `(recurso, chave)`.
 7. Sequences `optin_referencia_seq`, `optout_referencia_seq`.
 
-Fora, de propósito: `consulta_agenda`/`consulta_agenda_ur` (SPEC-03), `tenant_info` (§3), `schema_migrations` (§4). Tipos monetários, quando aparecerem, são `NUMERIC(18,2)` — nunca `float`.
+Fora, de propósito: `consulta_agenda`/`consulta_agenda_ur` (SPEC-03), `tenant_info` (§3), `schema_aplicado` (§4). Tipos monetários, quando aparecerem, são `NUMERIC(18,2)` — nunca `float`.
 
 ### 6.3 Seed
 
@@ -195,6 +199,8 @@ Fora, de propósito: `consulta_agenda`/`consulta_agenda_ur` (SPEC-03), `tenant_i
 - Painel/registro de tenants em banco (a lista é `TENANT_IDS`).
 - Migração de dados dos bancos antigos — foram derrubados de propósito. Os 2 opt-ins reais perdidos na CERC (`OPTIN-2026-000000438/439`) são recriados manualmente se necessário, fora deste escopo.
 - Trocar pg8000 por psycopg (Cloud SQL Connector só suporta pg8000/asyncpg para Postgres).
+- Terraform / IaC declarativo; Cloud Build trigger automático por push (deploy é `gcloud builds submit` manual até haver mais de uma pessoa fazendo deploy); projeto `ap-optin-prod` (mesma receita do §10, quando a CERC liberar produção).
+- Pub/Sub, Cloud Scheduler e o Cloud Run Job de reconciliação (design original §6) — sem código ainda; a infra deles entra junto com o código.
 
 ## 9. Riscos
 
@@ -202,3 +208,60 @@ Fora, de propósito: `consulta_agenda`/`consulta_agenda_ur` (SPEC-03), `tenant_i
 2. **Migration não-aditiva durante rollout** — mitigada por convenção (§4.4), não por ferramenta. Vale um item no checklist de PR.
 3. **`TENANT_IDS` e `TENANT_*_CONFIG` dessincronizados** — `migrate_tenants` e `provisionar_tenant` falham cedo e alto; o health check (`/health`) pode passar a listar tenants com config ausente (decidir no plano).
 4. **Merge da worktree** — há trabalho no `ap-front` (8 commits locais, nunca subidos) acoplado ao contrato da branch. O merge do back não obriga subir o front, mas o front local só funciona contra o back mergeado.
+5. **Runbook executado à mão** (§10) — o estado da infra vive na cabeça de quem rodou e no runbook, não em código. Mitigação: cada passo do runbook é idempotente ou verificável (`gcloud ... describe`), e prod é obrigado a seguir o mesmo documento.
+
+## 10. Infra GCP e deploy (homologação)
+
+Segue o molde dos irmãos (`etl-back-elegibility/cloudbuild.yaml`): infra criada **uma vez com `gcloud`**, deploy por `cloudbuild.yaml`. Diferença: os comandos ficam num runbook versionado (`docs/runbooks/gcp-setup.md`), não em comentários do yaml, porque precisam ser repetidos para prod. O runbook é executado via CLI nesta máquina, passo a passo, com aprovação antes de cada criação de recurso.
+
+### 10.1 Projeto e região
+
+- Projeto **`ap-optin-homolog`** (prod: `ap-optin-prod`, mesma receita), separado do `registradora-506000` antigo.
+- Região **`southamerica-east1`** (São Paulo): CERC e financiadores no Brasil; dado de EC no país evita discussão de residência de dados com financiador exigente. ~15–20% mais caro que `us-east1` — irrelevante nesta escala.
+- APIs: `run`, `sqladmin`, `secretmanager`, `cloudbuild`, `artifactregistry`, `iam`.
+
+### 10.2 Cloud SQL (uma instância)
+
+- `optin-pg`, Postgres 16, `db-g1-small` (homolog; prod dimensiona à parte), IP público **sem redes autorizadas** — acesso só via Cloud SQL Connector (IAM + TLS), como os irmãos. Backups automáticos + point-in-time recovery ligados; `deletion-protection` ligado.
+- Role de aplicação **`optin_app`** com `CREATEDB` (senha gerada, guardada só no Secret Manager). Serve para a app (§2.4) e para `ADMIN_DB_CONFIG` (§2.3, banco `postgres`). Sem role por tenant.
+- Nenhum banco lógico criado pelo runbook — bancos são criados por `provisionar_tenant` (§3).
+
+### 10.3 Secret Manager
+
+| Segredo | Conteúdo | Lido por |
+|---|---|---|
+| `TENANT_IDS` | `cnpj1,cnpj2` | `migrate_tenants`, `provisionar_tenant` (runtime, via `shared/secrets.py`) |
+| `TENANT_<cnpj>_CONFIG` | JSON §2.2 (`cloudsql_*` + `cerc_*`) | `get_tenant_config` (runtime) |
+| `ADMIN_DB_CONFIG` | JSON §2.3 | `provisionar_tenant` (runtime) |
+| `DJANGO_SECRET_KEY`, `IAM_JWT_PUBLIC_KEY` | valores | montados como env via `--set-secrets` no deploy |
+
+Tudo que é por tenant é lido **em runtime** pela API do Secret Manager (`GOOGLE_CLOUD_PROJECT` setado) — adicionar tenant = criar segredos + executar o job de provisionamento, **sem redeploy**. Só o que é estático do serviço vai via `--set-secrets`.
+
+### 10.4 Service accounts e IAM
+
+- **`optin-run@`** (runtime do service e dos jobs): `roles/cloudsql.client`, `roles/secretmanager.secretAccessor`. Nada mais.
+- **`optin-build@`** (Cloud Build): `roles/run.admin`, `roles/artifactregistry.writer`, `roles/logging.logWriter`, e `roles/iam.serviceAccountUser` **sobre** `optin-run@` (para deployar como ela).
+- Artifact Registry `optin` (Docker) em `southamerica-east1`. Imagem `southamerica-east1-docker.pkg.dev/ap-optin-homolog/optin/optin-service:<SHORT_SHA>`. Diferença dos irmãos (`gcr.io/...:latest`): Container Registry está descontinuado e tag por SHA permite rollback por revisão.
+
+### 10.5 Cloud Run
+
+- **Service `optin-service`**: ingress público (o front chama do navegador; auth é o JWT), `--service-account optin-run@`, 1 CPU / 512 Mi, concurrency 20, min 0 / max 3 (homolog), timeout 60 s. Env não sensível: `ENVIRONMENT=homolog`, `GOOGLE_CLOUD_PROJECT`, `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`, `IAM_JWT_ISSUER`, `CERC_AUTH_URL`, `CERC_API_BASE_URL`. Segredos via `--set-secrets` (§10.3). Sem `--add-cloudsql-instances` — o Connector não usa o socket Unix.
+- **Job `migrate-tenants`**: mesma imagem e SA, comando `python manage.py migrate_tenants`, 1 tarefa, sem retry (migration não é idempotente por acidente).
+- **Job `provisionar-tenant`**: idem, comando `python manage.py provisionar_tenant`, `<cnpj>` passado em `--args` na execução (`gcloud run jobs execute provisionar-tenant --args=<cnpj> --wait`).
+
+### 10.6 `cloudbuild.yaml` (ordem obrigatória)
+
+1. `docker build` + `push` com tag `$SHORT_SHA`.
+2. `gcloud run jobs update migrate-tenants --image <nova>` (o job aponta para a imagem nova, que contém as migrations novas).
+3. `gcloud run jobs execute migrate-tenants --wait` — **falhou, o build para aqui**; a revisão antiga continua servindo.
+4. `gcloud run deploy optin-service --image <nova>`.
+
+Substituições: `_REGION`, `_SERVICE`, `_RUNTIME_SA`, `_CORS_ALLOWED_ORIGINS`, `_CERC_AUTH_URL`, `_CERC_API_BASE_URL`. Deploy é `gcloud builds submit --config cloudbuild.yaml` manual (trigger por push fica de fora, §8).
+
+### 10.7 Primeiro deploy (ordem no runbook)
+
+Projeto → APIs → Artifact Registry → Cloud SQL + role → SAs + IAM → segredos (`TENANT_IDS`, `ADMIN_DB_CONFIG`, `DJANGO_SECRET_KEY`, `IAM_JWT_PUBLIC_KEY`, `TENANT_<cnpj>_CONFIG` do 1º tenant) → criar os dois jobs e o service com uma imagem inicial (`gcloud builds submit`) → `provisionar-tenant <cnpj>` → smoke test (`/health` + um `GET /api/v1/optins` com JWT do tenant).
+
+### 10.8 Custo estimado (homolog)
+
+Cloud SQL `db-g1-small` em `southamerica-east1` ≈ US$ 35–45/mês (item dominante); Cloud Run com min 0 ≈ zero em idle; Secret Manager e Artifact Registry desprezíveis. Ordem de grandeza: **US$ 40–50/mês**.
