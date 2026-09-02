@@ -66,3 +66,19 @@ precisa poder subir o fonte para o bucket de staging (owner/editor do projeto se
 Feito em 2026-09-02: `optin-run@brikz-ap.iam.gserviceaccount.com` (cloudsql.client, secretmanager.secretAccessor);
 `optin-build@brikz-ap.iam.gserviceaccount.com` (run.admin, artifactregistry.writer, logging.logWriter,
 cloudbuild.builds.builder) + serviceAccountUser sobre `optin-run@`.
+
+## 4. Segredos estáticos do serviço
+
+    python scripts/gerar_chaves_jwt.py keys/homolog        # privada fica local (backup fora do repo!)
+    gcloud secrets create IAM_JWT_PUBLIC_KEY --data-file=keys/homolog/jwt_public.pem \
+      --replication-policy=user-managed --locations=southamerica-east1
+    python -c 'import secrets; print(secrets.token_urlsafe(50))' \
+      | gcloud secrets create DJANGO_SECRET_KEY --data-file=- --replication-policy=user-managed --locations=southamerica-east1
+
+Emitir token: `python scripts/gerar_jwt.py --chave keys/homolog/jwt_private.pem --financiador <cnpj> --horas 24`.
+Segredos por tenant (`TENANT_IDS`, `TENANT_<cnpj>_CONFIG`) ficam na seção 6 (Plan 03) — são lidos em runtime,
+não montados no deploy, então onboardar tenant não exige redeploy.
+
+Feito em 2026-09-02: par RSA gerado em `keys/homolog/` (gitignorado — **fazer backup da privada fora do
+repo**, ela é quem emite tokens de homolog; perder = gerar par novo e trocar `IAM_JWT_PUBLIC_KEY`).
+Segredos `IAM_JWT_PUBLIC_KEY` e `DJANGO_SECRET_KEY` criados, versão 1 cada.

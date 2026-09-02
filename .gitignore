@@ -5,4 +5,5 @@ __pycache__/
 staticfiles/
 logs/
 *.pem
+keys/
 .claude/
