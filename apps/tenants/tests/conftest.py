@@ -17,7 +17,7 @@ def _engine_admin():
 
 def _url_para(nome_banco: str) -> str:
     admin_url = json.loads(os.environ["ADMIN_DB_CONFIG"])["database_url"]
-    return str(sqlalchemy.engine.make_url(admin_url).set(database=nome_banco))
+    return sqlalchemy.engine.make_url(admin_url).set(database=nome_banco).render_as_string(hide_password=False)
 
 
 @pytest.fixture
