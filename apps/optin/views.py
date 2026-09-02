@@ -4,8 +4,9 @@ import logging
 
 from django.http import JsonResponse
 
+from apps.cliente import repository as cliente_repository
 from apps.optin import repository
-from apps.optin.cerc_mapping import correlacionar_por_referencia, interpretar_item_opt_in
+from apps.optin.cerc_mapping import correlacionar_por_referencia, interpretar_item_opt_in, interpretar_item_opt_out
 from apps.optin.idempotency import idempotente
 from apps.optin.validation import (
     ValidationError,
@@ -38,6 +39,9 @@ def _serializar_optin(optin: dict) -> dict:
         "protocoloCerc": optin.get("protocolo_cerc"),
         "origem": optin["origem"],
         "status": optin["status"],
+        "errosCerc": [{"codigo": optin["erro_codigo"], "mensagem": optin["erro_mensagem"]}] if optin.get("erro_codigo") else [],
+        "clienteId": optin["cliente_id"],
+        "clienteNome": optin.get("cliente_nome"),
         "cnpjSolicitante": optin["cnpj_solicitante"],
         "cnpjFinanciador": optin["cnpj_financiador"],
         "usuarioFinalRecebedor": optin["documento_ufr"],
@@ -60,9 +64,18 @@ def criar_optin(request):
     except json.JSONDecodeError:
         return _erro_json("JSON_INVALIDO", "corpo da requisição não é JSON válido", 400)
 
+    cliente_id = payload.get("clienteId")
+    if not cliente_id:
+        return _erro_json("CLI002", "clienteId é obrigatório", 422)
+
+    cliente = cliente_repository.buscar_por_id(request.financiador_id, cliente_id)
+    if cliente is None:
+        return _erro_json("CLIENTE_NAO_ENCONTRADO", "cliente não encontrado", 404)
+
+    documento_ufr, tipo_ufr = cliente["documento"], cliente["documento_tipo"]
+
     try:
-        documento_ufr, tipo_ufr = validar_documento(payload.get("usuarioFinalRecebedor", ""))
-        titular_raw = payload.get("titular") or payload.get("usuarioFinalRecebedor", "")
+        titular_raw = payload.get("titular") or documento_ufr
         documento_titular, _ = validar_documento(titular_raw)
 
         credenciadoras = payload.get("credenciadoras") or []
@@ -88,6 +101,7 @@ def criar_optin(request):
     cnpj_solicitante = get_tenant_config(request.financiador_id)["cerc_cnpj_solicitante"]
 
     optin = repository.criar_optin_pendente(request.financiador_id, {
+        "cliente_id": cliente["id"],
         "cnpj_solicitante": cnpj_solicitante,
         "cnpj_financiador": request.financiador_id,
         "documento_ufr": documento_ufr,
@@ -125,7 +139,10 @@ def criar_optin(request):
     try:
         resposta = registrar_optin(request.financiador_id, payload_cerc, correlacao_id=optin["referencia_externa"])
     except Exception as exc:  # noqa: BLE001 - transporte (httpx) e negócio (CercApiError) tratados juntos aqui; classificação fina retentável/não-retentável (§9.2) fica no job de reconciliação, fora de escopo
-        repository.atualizar_status(request.financiador_id, optin["id"], "FALHA_ENVIO")
+        repository.atualizar_status(
+            request.financiador_id, optin["id"], "FALHA_ENVIO",
+            erro_codigo="CERC_INDISPONIVEL", erro_mensagem=str(exc),
+        )
         logger.warning("falha ao enviar optin %s para CERC: %s", optin["referencia_externa"], exc)
         return _erro_json("CERC_INDISPONIVEL", "falha ao registrar opt-in na CERC", 502)
 
@@ -136,7 +153,10 @@ def criar_optin(request):
         optin_final = repository.atualizar_status(request.financiador_id, optin["id"], "ATIVO", protocolo_cerc=resultado.protocolo)
         return JsonResponse(_serializar_optin(optin_final), status=201)
 
-    repository.atualizar_status(request.financiador_id, optin["id"], "REJEITADO")
+    repository.atualizar_status(
+        request.financiador_id, optin["id"], "REJEITADO",
+        erro_codigo=resultado.erro_codigo, erro_mensagem=resultado.erro_mensagem,
+    )
     return _erro_json(resultado.erro_codigo or "REJEITADO", resultado.erro_mensagem or "opt-in rejeitado pela CERC", 422)
 
 
@@ -248,11 +268,56 @@ def atualizar_optin_view(request, optin_id):
     return JsonResponse(_serializar_optin(optin_final))
 
 
+@jwt_required
+@idempotente("optin_cancel")
+def cancelar_optin_view(request, optin_id):
+    optin = repository.buscar_por_id(request.financiador_id, optin_id)
+    if optin is None:
+        return _erro_json("OPTIN_NAO_ENCONTRADO", "opt-in não encontrado", 404)
+
+    if optin["status"] != "ATIVO":
+        return _erro_json("OPTIN_NAO_ATIVO", "só é possível cancelar opt-in ATIVO", 409)
+
+    optout = repository.criar_optout_pendente(request.financiador_id, optin_id)
+
+    payload_cerc = {
+        "referenciaExterna": optout["referencia_externa"],
+        "cnpjSolicitante": get_tenant_config(request.financiador_id)["cerc_cnpj_solicitante"],
+        "carteira": optin.get("carteira"),
+    }
+
+    try:
+        resposta = encerrar_optin(
+            request.financiador_id, optin["protocolo_cerc"], payload_cerc, correlacao_id=optout["referencia_externa"]
+        )
+    except Exception as exc:  # noqa: BLE001 - mesmo tratamento uniforme das outras views de CERC
+        repository.rejeitar_optout(request.financiador_id, optout["id"])
+        logger.warning("falha ao cancelar optin %s na CERC: %s", optin["referencia_externa"], exc)
+        return _erro_json("CERC_INDISPONIVEL", "falha ao cancelar opt-in na CERC", 502)
+
+    item = correlacionar_por_referencia(resposta, optout["referencia_externa"])
+    resultado = interpretar_item_opt_out(item)
+
+    if resultado.status_local != "CONFIRMADO":
+        repository.rejeitar_optout(request.financiador_id, optout["id"])
+        return _erro_json(resultado.erro_codigo or "REJEITADO", resultado.erro_mensagem or "cancelamento rejeitado pela CERC", 422)
+
+    repository.confirmar_optout(request.financiador_id, optout["id"], optin_id, resultado.protocolo)
+    optin_final = repository.buscar_por_id(request.financiador_id, optin_id)
+    return JsonResponse(_serializar_optin(optin_final))
+
+
 def optin_detail(request, optin_id):
     if request.method == "GET":
         return detalhar_optin(request, optin_id)
     if request.method == "PATCH":
         return atualizar_optin_view(request, optin_id)
+    return JsonResponse({"erro": "METODO_NAO_PERMITIDO"}, status=405)
+
+
+def optin_cancelar(request, optin_id):
+    if request.method == "POST":
+        return cancelar_optin_view(request, optin_id)
     return JsonResponse({"erro": "METODO_NAO_PERMITIDO"}, status=405)
 
 

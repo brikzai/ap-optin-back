@@ -23,6 +23,8 @@ def _com_filhas(financiador_id: str, optin: dict) -> dict:
     optin["arranjos"] = [
         r["codigo"] for r in get_db(financiador_id).table("optin_arranjo").select("codigo").eq("optin_id", optin_id).execute().data
     ]
+    cliente_rows = get_db(financiador_id).table("cliente").select("nome").eq("id", optin["cliente_id"]).execute().data
+    optin["cliente_nome"] = cliente_rows[0]["nome"] if cliente_rows else None
     return optin
 
 
@@ -34,11 +36,11 @@ def criar_optin_pendente(financiador_id: str, dados: dict) -> dict:
         conn.execute(sqlalchemy.text("""
             INSERT INTO optin (
                 id, referencia_externa, origem, status, cnpj_solicitante, cnpj_financiador,
-                documento_ufr, documento_ufr_tipo, documento_titular, data_assinatura,
+                cliente_id, documento_ufr, documento_ufr_tipo, documento_titular, data_assinatura,
                 vigencia_inicio, vigencia_fim, carteira, evidencia_id
             ) VALUES (
                 :id, :referencia_externa, 'OPTIN', 'PENDENTE', :cnpj_solicitante, :cnpj_financiador,
-                :documento_ufr, :documento_ufr_tipo, :documento_titular, :data_assinatura,
+                :cliente_id, :documento_ufr, :documento_ufr_tipo, :documento_titular, :data_assinatura,
                 :vigencia_inicio, :vigencia_fim, :carteira, :evidencia_id
             )
         """), {
@@ -46,6 +48,7 @@ def criar_optin_pendente(financiador_id: str, dados: dict) -> dict:
             "referencia_externa": referencia_externa,
             "cnpj_solicitante": dados["cnpj_solicitante"],
             "cnpj_financiador": dados["cnpj_financiador"],
+            "cliente_id": dados["cliente_id"],
             "documento_ufr": dados["documento_ufr"],
             "documento_ufr_tipo": dados["documento_ufr_tipo"],
             "documento_titular": dados["documento_titular"],
@@ -98,10 +101,17 @@ def existe_optin_ativo_equivalente(financiador_id: str, documento_ufr, documento
     return False
 
 
-def atualizar_status(financiador_id: str, optin_id: str, status: str, protocolo_cerc: str = None) -> dict:
+def atualizar_status(
+    financiador_id: str, optin_id: str, status: str, protocolo_cerc: str = None,
+    erro_codigo: str = None, erro_mensagem: str = None,
+) -> dict:
     dados = {"status": status, "atualizado_em": timezone.now()}
     if protocolo_cerc is not None:
         dados["protocolo_cerc"] = protocolo_cerc
+    if erro_codigo is not None:
+        dados["erro_codigo"] = erro_codigo
+    if erro_mensagem is not None:
+        dados["erro_mensagem"] = erro_mensagem
     resultado = get_db(financiador_id).table("optin").update(dados).eq("id", optin_id).execute()
     return _com_filhas(financiador_id, resultado.data[0])
 
@@ -124,6 +134,43 @@ def atualizar_credenciadoras(financiador_id: str, optin_id: str, credenciadoras:
         get_db(financiador_id).table("optin_credenciadora").insert({"optin_id": optin_id, "cnpj": cnpj}).execute()
 
 
+def _com_filhas_lote(financiador_id: str, optins: list) -> list:
+    """Versão em lote de _com_filhas — 3 queries no total (não 3 por optin),
+    evitando N+1 quando listar() devolve muitas linhas."""
+    if not optins:
+        return []
+    optin_ids = [o["id"] for o in optins]
+    cliente_ids = list({o["cliente_id"] for o in optins})
+
+    with get_db(financiador_id)._engine.connect() as conn:
+        credenciadoras_rows = conn.execute(
+            sqlalchemy.text("SELECT optin_id, cnpj FROM optin_credenciadora WHERE optin_id = ANY(:ids)"),
+            {"ids": optin_ids},
+        ).mappings().all()
+        arranjos_rows = conn.execute(
+            sqlalchemy.text("SELECT optin_id, codigo FROM optin_arranjo WHERE optin_id = ANY(:ids)"),
+            {"ids": optin_ids},
+        ).mappings().all()
+        clientes_rows = conn.execute(
+            sqlalchemy.text("SELECT id, nome FROM cliente WHERE id = ANY(:ids)"),
+            {"ids": cliente_ids},
+        ).mappings().all()
+
+    credenciadoras_por_optin: dict = {}
+    for r in credenciadoras_rows:
+        credenciadoras_por_optin.setdefault(r["optin_id"], []).append(r["cnpj"])
+    arranjos_por_optin: dict = {}
+    for r in arranjos_rows:
+        arranjos_por_optin.setdefault(r["optin_id"], []).append(r["codigo"])
+    nome_por_cliente = {r["id"]: r["nome"] for r in clientes_rows}
+
+    for o in optins:
+        o["credenciadoras"] = credenciadoras_por_optin.get(o["id"], [])
+        o["arranjos"] = arranjos_por_optin.get(o["id"], [])
+        o["cliente_nome"] = nome_por_cliente.get(o["cliente_id"])
+    return optins
+
+
 def listar(financiador_id: str, filtros: dict, limit: int) -> list:
     query = get_db(financiador_id).table("optin").select("*")
     for campo in ("status", "documento_ufr", "origem", "carteira"):
@@ -132,7 +179,7 @@ def listar(financiador_id: str, filtros: dict, limit: int) -> list:
     if filtros.get("vigente_em"):
         query = query.lte("vigencia_inicio", filtros["vigente_em"]).gte("vigencia_fim", filtros["vigente_em"])
     resultado = query.order("criado_em", desc=True).limit(limit).execute().data
-    return [_com_filhas(financiador_id, r) for r in resultado]
+    return _com_filhas_lote(financiador_id, resultado)
 
 
 def arranjos_ativos(financiador_id: str) -> set:

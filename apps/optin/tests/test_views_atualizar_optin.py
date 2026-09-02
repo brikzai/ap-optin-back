@@ -11,6 +11,18 @@ from shared.cloudsql_client import get_db
 DOC_UFR = "22751826000125"
 FINANCIADOR_TESTE = "12345678000199"
 
+from apps.cliente import repository as cliente_repository
+
+
+def _cliente_id_teste():
+    existente = cliente_repository.buscar_por_documento(FINANCIADOR_TESTE, DOC_UFR)
+    if existente:
+        return existente["id"]
+    return cliente_repository.criar(FINANCIADOR_TESTE, {
+        "documento": DOC_UFR, "documento_tipo": "CNPJ", "nome": "Cliente Teste",
+        "email": None, "telefone": None,
+    })["id"]
+
 
 def _limpar():
     ids = [r["id"] for r in get_db(FINANCIADOR_TESTE).table("optin").select("id").eq("documento_ufr", DOC_UFR).execute().data]
@@ -38,6 +50,7 @@ def _criar_pendente():
     import datetime
 
     return repository.criar_optin_pendente(FINANCIADOR_TESTE, {
+        "cliente_id": _cliente_id_teste(),
         "cnpj_solicitante": "12345678000199", "cnpj_financiador": "12345678000199",
         "documento_ufr": DOC_UFR, "documento_ufr_tipo": "CNPJ", "documento_titular": DOC_UFR,
         "data_assinatura": datetime.date(2026, 8, 10), "vigencia_inicio": datetime.date(2026, 8, 11),
