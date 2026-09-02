@@ -19,8 +19,8 @@ import shared.cloudsql_client as cloudsql_client_module  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _clean_dominio_arranjo(request):
-    # Skip cleanup for tests that don't need the database
-    if request.node.name == "test_create_engine_usa_database_url_quando_presente":
+    # Skip cleanup for tests marked com sem_banco (não precisam de Postgres rodando)
+    if request.node.get_closest_marker("sem_banco"):
         yield
         return
     db = get_db(FINANCIADOR_TESTE)
@@ -150,6 +150,7 @@ def test_gte_lte_filters_range_query():
         db.table("dominio_arranjo").delete().eq("codigo", "GTE2").execute()
 
 
+@pytest.mark.sem_banco
 def test_create_engine_usa_database_url_quando_presente():
     # create_engine é lazy: não conecta, só monta a URL — dá pra testar sem banco.
     engine = cloudsql_client_module._create_engine({
