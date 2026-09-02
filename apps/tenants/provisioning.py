@@ -8,7 +8,6 @@ aqui, não numa migration, porque get_db (§5) precisa dela antes de qualquer sc
 import json
 import logging
 
-import sqlalchemy
 from sqlalchemy import text
 
 from apps.tenants import registry, runner
@@ -31,15 +30,13 @@ def config_admin() -> dict:
     return json.loads(get_secret("ADMIN_DB_CONFIG"))
 
 
-def banco_existe(engine_admin, nome: str) -> bool:
-    with engine_admin.connect() as conn:
-        return conn.execute(text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": nome}).scalar() is not None
+def banco_existe(conn, nome: str) -> bool:
+    return conn.execute(text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": nome}).scalar() is not None
 
 
-def criar_banco(engine_admin, nome: str) -> None:
+def criar_banco(conn, nome: str) -> None:
     registry.nome_banco(nome.removeprefix("ap_"))  # revalida o formato antes de interpolar
-    with engine_admin.connect() as conn:
-        conn.exec_driver_sql(f'CREATE DATABASE "{nome}"')
+    conn.exec_driver_sql(f'CREATE DATABASE "{nome}"')
 
 
 def garantir_tenant_info(engine, financiador_id: str) -> None:
@@ -67,22 +64,22 @@ def provisionar(financiador_id: str, existente: bool = False) -> list:
         raise registry.RegistroTenantsInvalido(f"{financiador_id} e {colisao} apontam para o mesmo banco")
 
     nome = registry.nome_banco(financiador_id)
-    # AUTOCOMMIT no Engine (não em create_engine) para o DDL CREATE DATABASE:
-    # preserva os dois caminhos de _create_engine (database_url e Cloud SQL Connector).
-    admin_config = config_admin()
-    if "database_url" in admin_config:
-        # Dev/teste: use database_url com AUTOCOMMIT no create_engine
-        engine_admin = sqlalchemy.create_engine(admin_config["database_url"], isolation_level="AUTOCOMMIT")
-    else:
-        # Homolog/prod: Cloud SQL Connector requer _create_engine, depois execution_options
-        engine_admin = _create_engine(admin_config).execution_options(isolation_level="AUTOCOMMIT")
+    # Engine SEMPRE via _create_engine (trata database_url e Cloud SQL Connector),
+    # com AUTOCOMMIT porque CREATE DATABASE não roda em transação.
+    #
+    # UMA única conexão para checar e criar: numa conexão RECICLADA do pool o
+    # AUTOCOMMIT não vale a tempo (o pool_pre_ping roda antes) e o CREATE DATABASE
+    # falha com 25001 "não pode ser executado dentro de um bloco de transação".
+    # Não separe isto em duas conexões.
+    engine_admin = _create_engine(config_admin()).execution_options(isolation_level="AUTOCOMMIT")
     try:
-        if banco_existe(engine_admin, nome):
-            if not existente:
-                raise BancoJaExiste(f"{nome} já existe (use --existente para reaproveitar)")
-        else:
-            criar_banco(engine_admin, nome)
-            logger.info("[provisionar] banco %s criado", nome)
+        with engine_admin.connect() as conn:
+            if banco_existe(conn, nome):
+                if not existente:
+                    raise BancoJaExiste(f"{nome} já existe (use --existente para reaproveitar)")
+            else:
+                criar_banco(conn, nome)
+                logger.info("[provisionar] banco %s criado", nome)
     finally:
         engine_admin.dispose()
 

@@ -88,10 +88,10 @@ def test_garantir_tenant_info_recusa_outro_dono(banco_descartavel):
 
 
 def test_provisionar_usa_create_engine_para_a_config_admin(monkeypatch):
-    # Regressão: o engine do tenant TEM que passar por _create_engine, senão o caminho
-    # Cloud SQL (config sem database_url) quebra em homolog/produção.
-    # O engine admin usa sqlalchemy.create_engine direto quando há database_url (dev/teste),
-    # mas _create_engine será chamado com o config do tenant (segunda chamada).
+    # Regressão do bug crítico: o engine ADMIN tem que passar por _create_engine.
+    # Se alguém voltar a construí-lo com sqlalchemy.create_engine(config["database_url"]),
+    # o caminho Cloud SQL (ADMIN_DB_CONFIG sem database_url) quebra com KeyError em
+    # homolog/produção — e este teste falha.
     monkeypatch.setenv("TENANT_IDS", CNPJ_A)
     _configura(monkeypatch, CNPJ_A, f"ap_{CNPJ_A}")
     _dropa(f"ap_{CNPJ_A}")
@@ -109,8 +109,8 @@ def test_provisionar_usa_create_engine_para_a_config_admin(monkeypatch):
     finally:
         _dropa(f"ap_{CNPJ_A}")
 
-    # _create_engine deve ser chamado para o config do tenant (que vem de get_tenant_config)
-    # para preservar o caminho Cloud SQL em produção
     assert vistos, "_create_engine nunca foi chamado"
-    tenant_config = provisioning.get_tenant_config(CNPJ_A)
-    assert tenant_config in vistos
+    assert vistos[0] == provisioning.config_admin(), (
+        "a primeira chamada de _create_engine deve ser a config admin — "
+        "o engine admin não pode ser construído fora de _create_engine"
+    )
