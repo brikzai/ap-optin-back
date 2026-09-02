@@ -121,3 +121,30 @@ qualquer `gcloud builds submit`:**
   dois arquivos, e criado `.gcloudignore` explícito em vez de depender do fallback.
 - **Importante** (não é código, é o próprio Cloud SQL): `ssl_mode` estava `ALLOW_UNENCRYPTED_AND_ENCRYPTED`.
   Corrigido para `ENCRYPTED_ONLY` (seção 2 acima).
+
+## 6. Onboarding de tenant
+
+Um tenant = uma entrada em `TENANT_IDS` + um segredo `TENANT_<cnpj>_CONFIG` + um banco `ap_<cnpj>`.
+
+1. `TENANT_IDS`: nova versão com a lista completa, separada por vírgula:
+       printf 'cnpj1,cnpj2' | gcloud secrets versions add TENANT_IDS --data-file=-
+   (na primeira vez: `gcloud secrets create TENANT_IDS ...`)
+2. `TENANT_<cnpj>_CONFIG`: JSON com `cloudsql_connection_name`, `cloudsql_db_user`, `cloudsql_db_password`
+   (mesmos de `ADMIN_DB_CONFIG`), `cloudsql_db_name = ap_<cnpj>`, `cerc_client_id`, `cerc_client_secret`,
+   `cerc_cnpj_solicitante`. Monte num arquivo temporário local (nunca em pipe triplo — no Git Bash/Windows
+   um pipe encadeado `gcloud | python | gcloud` pode quebrar silenciosamente e criar um segredo com **zero
+   versões**, sem erro visível; sempre confirme com `gcloud secrets versions list <nome>` depois), suba com
+   `--data-file=<arquivo>` e apague o arquivo em seguida.
+3. Provisionar o banco:
+   - Primeiro tenant do projeto (jobs ainda não existem): da máquina local, com ADC —
+         gcloud auth application-default login
+         GOOGLE_CLOUD_PROJECT=brikz-ap python manage.py provisionar_tenant <cnpj>
+   - Demais: `gcloud run jobs execute optin-manage --region southamerica-east1 --wait --args=manage.py,provisionar_tenant,<cnpj>`
+4. Seed: `gcloud run jobs execute optin-manage --region southamerica-east1 --wait --args=manage.py,seed_dominio_arranjo,--tenant,<cnpj>`
+5. Token para o financiador: `python scripts/gerar_jwt.py --chave keys/homolog/jwt_private.pem --financiador <cnpj>`
+
+Sem redeploy: o service lê `TENANT_<cnpj>_CONFIG` na primeira requisição daquele tenant.
+
+Feito em 2026-09-02: `TENANT_IDS` = `38138785000136`; `TENANT_38138785000136_CONFIG` criado (7 chaves,
+`cloudsql_db_name=ap_38138785000136`, credenciais CERC de `C:\DEV\ap\.env API CERC.txt`) — verificado
+sem expor valores. Este é o primeiro tenant (CERC homologação).

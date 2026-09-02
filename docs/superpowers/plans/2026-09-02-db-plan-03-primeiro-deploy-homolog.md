@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - Projeto `brikz-ap`, região `southamerica-east1`, conta `ricardo@brikz.ai`. Todo comando que cria/altera recurso ou segredo pede aprovação do usuário antes.
-- Segredos nunca em arquivo do repo nem em log. Credenciais da CERC vêm de `C:\Users\rdeli\OneDrive\Área de Trabalho\.env API CERC.txt` (HANDOFF da worktree) — lidas por script, nunca `cat`/`echo`.
+- Segredos nunca em arquivo do repo nem em log. Credenciais da CERC vêm de `C:\DEV\ap\.env API CERC.txt` (HANDOFF da worktree) — lidas por script, nunca `cat`/`echo`.
 - Banco do tenant é `ap_38138785000136` (spec §3.2). `TENANT_IDS` em homolog = `38138785000136` **apenas** — o `12345678000199` é local.
 - A suíte local **não** roda com `GOOGLE_CLOUD_PROJECT` setado (o `conftest.py` aborta). Passe a variável inline no comando de provisionamento, nunca no `.env`.
 
@@ -36,7 +36,7 @@ Run:
 ```bash
 python - <<'EOF'
 from pathlib import Path
-p = Path(r"C:\Users\rdeli\OneDrive\Área de Trabalho\.env API CERC.txt")
+p = Path(r"C:\DEV\ap\.env API CERC.txt")
 chaves = {l.split("=",1)[0].strip() for l in p.read_text(encoding="utf-8").splitlines() if "=" in l and not l.strip().startswith("#")}
 print(sorted(chaves))
 EOF
@@ -53,14 +53,20 @@ Verify: `gcloud secrets versions access latest --secret=TENANT_IDS` → `3813878
 
 - [ ] **Step 3: `TENANT_38138785000136_CONFIG` (pedir aprovação)**
 
-Monta o JSON em memória a partir de `ADMIN_DB_CONFIG` (senha) e do arquivo da CERC, e envia direto para o Secret Manager:
+**Nunca encadeie `gcloud | python | gcloud` num pipe triplo** — no Git Bash/Windows isso pode quebrar
+silenciosamente no meio (o `gcloud` de saída cria o segredo mesmo com stdin vazio, resultando numa
+secret com **zero versões**, sem erro visível no exit code do comando de fora). Monte o JSON num arquivo
+temporário local, suba com `--data-file=<arquivo>`, apague o arquivo:
 ```bash
-gcloud secrets versions access latest --secret=ADMIN_DB_CONFIG | python - <<'EOF' | gcloud secrets create TENANT_38138785000136_CONFIG --data-file=- --replication-policy=user-managed --locations=southamerica-east1
+TMPCFG="$(mktemp)"
+gcloud secrets versions access latest --secret=ADMIN_DB_CONFIG > "${TMPCFG}.admin"
+python3 - "${TMPCFG}.admin" "$TMPCFG" <<'EOF'
 import json, sys
 from pathlib import Path
-admin = json.load(sys.stdin)
+admin_path, out_path = sys.argv[1], sys.argv[2]
+admin = json.loads(Path(admin_path).read_text(encoding="utf-8"))
 cerc = {}
-for l in Path(r"C:\Users\rdeli\OneDrive\Área de Trabalho\.env API CERC.txt").read_text(encoding="utf-8").splitlines():
+for l in Path(r"C:\DEV\ap\.env API CERC.txt").read_text(encoding="utf-8").splitlines():
     if "=" in l and not l.strip().startswith("#"):
         k, v = l.split("=", 1); cerc[k.strip()] = v.strip().strip('"').strip("'")
 cfg = {
@@ -73,10 +79,20 @@ cfg = {
     "cerc_cnpj_solicitante": "38138785000136",
 }
 assert all(cfg.values()), "campo vazio na config do tenant"
-sys.stdout.write(json.dumps(cfg))
+Path(out_path).write_text(json.dumps(cfg), encoding="utf-8")
 EOF
+gcloud secrets create TENANT_38138785000136_CONFIG --data-file="$TMPCFG" --replication-policy=user-managed --locations=southamerica-east1
+shred -u "$TMPCFG" "${TMPCFG}.admin" 2>/dev/null || rm -f "$TMPCFG" "${TMPCFG}.admin"
 ```
-Verify (sem expor segredos):
+Verify — **sempre**, mesmo que o comando acima não tenha reportado erro (é exatamente o tipo de falha
+silenciosa que este passo existe para pegar):
+```bash
+gcloud secrets versions list TENANT_38138785000136_CONFIG --format="value(name,state)"
+```
+Expected: uma linha `1  enabled`. Vazio = a criação falhou silenciosamente; apague o segredo
+(`gcloud secrets delete TENANT_38138785000136_CONFIG --quiet`) e refaça o passo.
+
+Depois, confira o conteúdo sem expor segredos:
 ```bash
 gcloud secrets versions access latest --secret=TENANT_38138785000136_CONFIG | python -c "import json,sys; d=json.load(sys.stdin); print(sorted(d), d['cloudsql_db_name'], d['cerc_cnpj_solicitante'])"
 ```
@@ -94,7 +110,9 @@ Um tenant = uma entrada em `TENANT_IDS` + um segredo `TENANT_<cnpj>_CONFIG` + um
    (na primeira vez: `gcloud secrets create TENANT_IDS ...`)
 2. `TENANT_<cnpj>_CONFIG`: JSON com `cloudsql_connection_name`, `cloudsql_db_user`, `cloudsql_db_password`
    (mesmos de `ADMIN_DB_CONFIG`), `cloudsql_db_name = ap_<cnpj>`, `cerc_client_id`, `cerc_client_secret`,
-   `cerc_cnpj_solicitante`. Monte em memória e envie com `--data-file=-`; nunca grave em arquivo.
+   `cerc_cnpj_solicitante`. Monte num arquivo temporário local e suba com `--data-file=<arquivo>` (nunca
+   um pipe triplo `gcloud | python | gcloud` — no Git Bash/Windows pode quebrar em silêncio e criar um
+   segredo com zero versões); apague o arquivo depois. Sempre confira com `gcloud secrets versions list`.
 3. Provisionar o banco:
    - Primeiro tenant do projeto (jobs ainda não existem): da máquina local, com ADC —
          gcloud auth application-default login
