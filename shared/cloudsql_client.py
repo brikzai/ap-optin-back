@@ -16,6 +16,20 @@ from shared.tenant_config import get_tenant_config
 logger = logging.getLogger(__name__)
 
 
+class _Now:
+    """Sentinel para QueryBuilder.update(): grava a coluna com now() do Postgres
+    em vez de um parâmetro vindo do Python. Evita comparar timestamp gerado no
+    servidor (ex.: DEFAULT now() de criar()) com timestamp gerado no cliente —
+    duas fontes de relógio cuja diferença pode ser de poucas centenas de
+    microssegundos, ordem que não é garantida entre processos distintos."""
+
+    def __repr__(self):
+        return "NOW()"
+
+
+NOW = _Now()
+
+
 class ExecuteResult:
     def __init__(self, data=None, count: Optional[int] = None):
         self.data = data or []
@@ -153,9 +167,14 @@ class QueryBuilder:
     def _exec_update(self) -> ExecuteResult:
         from sqlalchemy import text
 
-        serialized = {k: self._serialize(v) for k, v in self._update_data.items()}
-        set_clause = ", ".join(f"{k} = :u_{k}" for k in serialized)
-        params = {f"u_{k}": v for k, v in serialized.items()}
+        set_parts, params = [], {}
+        for k, v in self._update_data.items():
+            if v is NOW:
+                set_parts.append(f"{k} = now()")
+            else:
+                set_parts.append(f"{k} = :u_{k}")
+                params[f"u_{k}"] = self._serialize(v)
+        set_clause = ", ".join(set_parts)
         where, where_params = self._build_where()
         params.update(where_params)
         sql = f"UPDATE {self._table} SET {set_clause} {where} RETURNING *"

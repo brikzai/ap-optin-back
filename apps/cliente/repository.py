@@ -1,10 +1,9 @@
 """Acesso a dados da entidade cliente — pré-requisito mínimo para gerir opt-ins
 (design: docs/superpowers/specs/2026-08-25-frontend-integration-design.md §2)."""
 
-from django.utils import timezone
 from ulid import ULID
 
-from shared.cloudsql_client import get_db
+from shared.cloudsql_client import NOW, get_db
 
 
 def criar(financiador_id: str, dados: dict) -> dict:
@@ -22,7 +21,7 @@ def criar(financiador_id: str, dados: dict) -> dict:
 
 
 def atualizar(financiador_id: str, cliente_id: str, dados: dict) -> dict:
-    campos = {**dados, "atualizado_em": timezone.now()}
+    campos = {**dados, "atualizado_em": NOW}
     resultado = get_db(financiador_id).table("cliente").update(campos).eq("id", cliente_id).execute()
     return resultado.data[0] if resultado.data else None
 
