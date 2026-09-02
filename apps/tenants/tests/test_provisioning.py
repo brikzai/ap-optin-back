@@ -85,3 +85,32 @@ def test_garantir_tenant_info_recusa_outro_dono(banco_descartavel):
     provisioning.garantir_tenant_info(engine, CNPJ_A)  # idempotente
     with pytest.raises(TenantInfoDivergente):
         provisioning.garantir_tenant_info(engine, CNPJ_B)
+
+
+def test_provisionar_usa_create_engine_para_a_config_admin(monkeypatch):
+    # Regressão: o engine do tenant TEM que passar por _create_engine, senão o caminho
+    # Cloud SQL (config sem database_url) quebra em homolog/produção.
+    # O engine admin usa sqlalchemy.create_engine direto quando há database_url (dev/teste),
+    # mas _create_engine será chamado com o config do tenant (segunda chamada).
+    monkeypatch.setenv("TENANT_IDS", CNPJ_A)
+    _configura(monkeypatch, CNPJ_A, f"ap_{CNPJ_A}")
+    _dropa(f"ap_{CNPJ_A}")
+
+    vistos = []
+    real = provisioning._create_engine
+
+    def espiao(config):
+        vistos.append(config)
+        return real(config)
+
+    monkeypatch.setattr(provisioning, "_create_engine", espiao)
+    try:
+        provisioning.provisionar(CNPJ_A)
+    finally:
+        _dropa(f"ap_{CNPJ_A}")
+
+    # _create_engine deve ser chamado para o config do tenant (que vem de get_tenant_config)
+    # para preservar o caminho Cloud SQL em produção
+    assert vistos, "_create_engine nunca foi chamado"
+    tenant_config = provisioning.get_tenant_config(CNPJ_A)
+    assert tenant_config in vistos

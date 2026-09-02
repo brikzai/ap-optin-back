@@ -67,9 +67,15 @@ def provisionar(financiador_id: str, existente: bool = False) -> list:
         raise registry.RegistroTenantsInvalido(f"{financiador_id} e {colisao} apontam para o mesmo banco")
 
     nome = registry.nome_banco(financiador_id)
-    # Create admin engine with AUTOCOMMIT for DDL operations (CREATE/DROP DATABASE)
+    # AUTOCOMMIT no Engine (não em create_engine) para o DDL CREATE DATABASE:
+    # preserva os dois caminhos de _create_engine (database_url e Cloud SQL Connector).
     admin_config = config_admin()
-    engine_admin = sqlalchemy.create_engine(admin_config['database_url'], isolation_level="AUTOCOMMIT")
+    if "database_url" in admin_config:
+        # Dev/teste: use database_url com AUTOCOMMIT no create_engine
+        engine_admin = sqlalchemy.create_engine(admin_config["database_url"], isolation_level="AUTOCOMMIT")
+    else:
+        # Homolog/prod: Cloud SQL Connector requer _create_engine, depois execution_options
+        engine_admin = _create_engine(admin_config).execution_options(isolation_level="AUTOCOMMIT")
     try:
         if banco_existe(engine_admin, nome):
             if not existente:
