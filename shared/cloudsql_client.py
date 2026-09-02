@@ -181,6 +181,22 @@ class CloudSQLClient:
         return QueryBuilder(self._engine, name)
 
 
+class TenantMismatchError(RuntimeError):
+    """O banco configurado para este financiador_id pertence a outro tenant (ou a nenhum)."""
+
+
+def _verificar_tenant(engine, financiador_id: str) -> None:
+    from sqlalchemy import text
+
+    with engine.connect() as conn:
+        dono = conn.execute(text("SELECT financiador_id FROM tenant_info")).scalar()
+    if dono != financiador_id:
+        raise TenantMismatchError(
+            f"banco configurado para {financiador_id} pertence a {dono!r} — "
+            "confira TENANT_{cnpj}_CONFIG; nunca dois tenants no mesmo banco (spec 2026-09-02 §5)"
+        )
+
+
 def _create_engine(config: dict):
     """Engine por tenant. `database_url` (dev/teste) tem precedência sobre as
     chaves cloudsql_* (Cloud SQL Connector, homolog/prod). Spec 2026-09-02 §2.2."""
@@ -234,6 +250,11 @@ def get_db(financiador_id: str) -> CloudSQLClient:
 
         config = get_tenant_config(financiador_id)
         engine = _create_engine(config)
+        try:
+            _verificar_tenant(engine, financiador_id)
+        except Exception:
+            engine.dispose()
+            raise
         client = CloudSQLClient(engine)
         _clients[financiador_id] = client
         return client
