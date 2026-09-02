@@ -182,3 +182,29 @@ sem expor valores. Este é o primeiro tenant (CERC homologação).
   acima depois de esperar** — é o único passo que falta para o serviço aceitar tráfego público.
 - Depois que o binding funcionar, rodar o smoke test completo (seção 8, a escrever): `/health` → 200,
   `/optins` sem JWT → 401 (da aplicação, não do Google Frontend), `/optins` com JWT do tenant → 200.
+
+## 8. Smoke test pós-deploy
+
+    URL=$(gcloud run services describe optin-service --region southamerica-east1 --format="value(status.url)")
+    TOKEN=$(python scripts/gerar_jwt.py --chave keys/homolog/jwt_private.pem --financiador 38138785000136)
+    curl -s -w "\n%{http_code}\n" "$URL/api/v1/health"                                   # 200
+    curl -s -w "\n%{http_code}\n" "$URL/api/v1/optins"                                   # 401
+    curl -s -w "\n%{http_code}\n" -H "Authorization: Bearer $TOKEN" "$URL/api/v1/optins" # 200
+
+Feito em 2026-09-02: `allUsers`/`run.invoker` propagou (levou ~alguns minutos após a exceção de projeto
+da seção 7). Resultado: `/health` 200, `/optins` sem JWT 401 (da aplicação — `NAO_AUTENTICADO`), `/optins`
+e `/clientes` com JWT do tenant 200 (`{"dados": []}`, tenant recém-provisionado). JWT de tenant
+desconhecido (não provisionado) → 500 genérico do Django, consistente em 3 tentativas — nenhum dado
+vazado (comportamento aceito no design; virar 403 é escopo futuro).
+`seed_dominio_arranjo --tenant 38138785000136` executado via job `optin-manage`, log confirmado:
+`[seed] ap_38138785000136: dominio_arranjo ok`.
+
+**optin-service em homolog está no ar e servindo tráfego real:**
+`https://optin-service-6sy5bhymwq-rj.a.run.app`
+
+**Pendências que sobraram deste deploy (nenhuma bloqueia o uso atual):**
+- `_CORS_ALLOWED_ORIGINS` do `cloudbuild.yaml` ainda é `http://localhost:5173` — atualizar quando o
+  `ap-front` tiver uma URL própria de homolog, e redeployar.
+- A exceção de Domain Restricted Sharing (seção 7) está só neste projeto (`brikz-ap`); replicar a mesma
+  receita no projeto de produção quando ele existir.
+- Minors da revisão de infra (M2-M5, ver histórico do plano 02) seguem em aberto, nenhum urgente.

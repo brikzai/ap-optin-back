@@ -120,6 +120,33 @@ O `conftest.py` da raiz provisiona e migra o tenant de teste uma única vez por 
 
 Ver spec: `docs/superpowers/specs/2026-09-02-database-multitenant-migrations-design.md` (§7 testes, §8.1 bootstrap).
 
+## Homolog (brikz-ap)
+
+Back no ar: `https://optin-service-6sy5bhymwq-rj.a.run.app`. Confirmar a URL atual:
+
+```bash
+gcloud run services describe optin-service --region southamerica-east1 --format="value(status.url)"
+```
+
+Token de 24h para o tenant real (CERC homologação, `38138785000136`):
+
+```bash
+python scripts/gerar_jwt.py --chave keys/homolog/jwt_private.pem --financiador 38138785000136
+```
+
+Front local contra homolog (`ap-front/.env`):
+
+```
+VITE_OPTIN_API_BASE_URL=<URL>/api/v1
+VITE_OPTIN_DEV_JWT=<token>
+VITE_FINANCIADOR_ID=38138785000136
+```
+
+Quando o front tiver URL própria, atualizar `_CORS_ALLOWED_ORIGINS` em `cloudbuild.yaml` e redeployar
+(`gcloud builds submit --config cloudbuild.yaml --substitutions=_TAG=$(git rev-parse --short HEAD)`).
+
+Infra completa (Cloud SQL, IAM, segredos, deploy, troubleshooting): `docs/runbooks/gcp-setup.md`.
+
 ## Sem Docker nesta máquina
 
 Quem tiver Docker pode usar a alternativa:
