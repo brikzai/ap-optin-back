@@ -148,3 +148,37 @@ Sem redeploy: o service lê `TENANT_<cnpj>_CONFIG` na primeira requisição daqu
 Feito em 2026-09-02: `TENANT_IDS` = `38138785000136`; `TENANT_38138785000136_CONFIG` criado (7 chaves,
 `cloudsql_db_name=ap_38138785000136`, credenciais CERC de `C:\DEV\ap\.env API CERC.txt`) — verificado
 sem expor valores. Este é o primeiro tenant (CERC homologação).
+
+## 7. Primeiro deploy — estado em 2026-09-02
+
+- Tenant `38138785000136` provisionado via `provisionar_tenant` local (ADC de `ricardo@brikz.ai`,
+  `gcloud auth application-default login --account=ricardo@brikz.ai`) — banco `ap_38138785000136`
+  criado, `0001_baseline.sql` aplicada, idempotente (`--existente` → 0 migrations).
+- `gcloud builds submit --config cloudbuild.yaml --substitutions=_TAG=1227fbf` → **SUCCESS** (2m21s).
+  Jobs `migrate-tenants`/`optin-manage` criados; `migrate-tenants` executou com sucesso (1 tarefa,
+  0 falhas). Service `optin-service` deployado, revisão `optin-service-00001-7jt`, URL
+  `https://optin-service-6sy5bhymwq-rj.a.run.app`.
+- **Bloqueio encontrado:** `/api/v1/health` retornou `403` do Google Frontend (não da aplicação) —
+  `--allow-unauthenticated` no deploy não teve efeito porque a organização `brikz.ai` tem a política
+  **Domain Restricted Sharing** (`constraints/iam.allowedPolicyMemberDomains`, `allowedValues: [C0380bkka]`)
+  herdada no projeto, que bloqueia `allUsers`/`allAuthenticatedUsers` em qualquer binding de IAM.
+  Confirmado com `gcloud run services get-iam-policy optin-service` (policy vazia) e a mensagem exata
+  do `add-iam-policy-binding`: `FAILED_PRECONDITION: One or more users named in the policy do not
+  belong to a permitted customer`.
+- **Correção aplicada (só neste projeto, não na organização):**
+  ```
+  gcloud services enable orgpolicy.googleapis.com
+  # arquivo local (não commitado):
+  #   name: projects/brikz-ap/policies/iam.allowedPolicyMemberDomains
+  #   spec: { rules: [{ allowAll: true }] }
+  gcloud org-policies set-policy <arquivo>
+  ```
+  `ricardo@brikz.ai` tinha `orgpolicy.policyAdmin` no projeto — a exceção foi criada com sucesso
+  (`gcloud org-policies describe ... --effective` já mostra `allowAll: true`).
+- **Pendente:** `gcloud run services add-iam-policy-binding optin-service --region southamerica-east1
+  --member=allUsers --role=roles/run.invoker` ainda falha com o mesmo erro — a definição da política
+  já mudou mas o **enforcement** do IAM do Cloud Run ainda não propagou (pode levar de minutos a
+  cerca de uma hora, comportamento conhecido do GCP para esta constraint). **Reexecutar o comando
+  acima depois de esperar** — é o único passo que falta para o serviço aceitar tráfego público.
+- Depois que o binding funcionar, rodar o smoke test completo (seção 8, a escrever): `/health` → 200,
+  `/optins` sem JWT → 401 (da aplicação, não do Google Frontend), `/optins` com JWT do tenant → 200.
