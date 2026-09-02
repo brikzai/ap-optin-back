@@ -17,6 +17,7 @@ INSTALLED_APPS = [
     "corsheaders",
     "apps.optin",
     "apps.cliente",
+    "apps.tenants",
 ]
 
 MIDDLEWARE = [
