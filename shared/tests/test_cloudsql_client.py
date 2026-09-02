@@ -19,6 +19,22 @@ import shared.tenant_config as tenant_config_module  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _limpa_caches_de_tenant():
+    # Estado global por processo: sem isto, um assert que falha no meio de um teste
+    # deixa _clients/_locks sujos e derruba os testes seguintes.
+    def limpar():
+        for cnpj in (FINANCIADOR_TESTE_2, FINANCIADOR_TESTE_3):
+            cloudsql_client_module._clients.pop(cnpj, None)
+            cloudsql_client_module._locks.pop(cnpj, None)
+        tenant_config_module._cache.pop(FINANCIADOR_TESTE_2, None)
+        tenant_config_module._cache.pop(FINANCIADOR_TESTE_3, None)
+
+    limpar()
+    yield
+    limpar()
+
+
+@pytest.fixture(autouse=True)
 def _clean_dominio_arranjo(request):
     # Skip cleanup for tests marked com sem_banco (não precisam de Postgres rodando)
     if request.node.get_closest_marker("sem_banco"):
@@ -56,8 +72,6 @@ def test_insert_select_update_delete_round_trip():
 
 
 def test_get_db_cacheia_por_financiador_id(monkeypatch):
-    cloudsql_client_module._clients.clear()
-    tenant_config_module._cache.pop(FINANCIADOR_TESTE_2, None)
     monkeypatch.setenv(f"TENANT_{FINANCIADOR_TESTE_2}_CONFIG", os.environ[f"TENANT_{FINANCIADOR_TESTE}_CONFIG"])
     # Engine fake + guarda desligada: o que se prova aqui é só o cache por id.
     monkeypatch.setattr(cloudsql_client_module, "_create_engine", lambda config: object())
@@ -70,15 +84,11 @@ def test_get_db_cacheia_por_financiador_id(monkeypatch):
     assert db1a is db1b
     assert db1a is not db2
 
-    cloudsql_client_module._clients.clear()
-
 
 def test_get_db_recusa_tenant_apontando_para_banco_de_outro(monkeypatch):
     # Reproduz o incidente do HANDOFF (dois tenants no mesmo banco): o banco do
     # tenant de teste tem tenant_info = FINANCIADOR_TESTE; pedir get_db de outro
     # id com a MESMA config tem que explodir, não servir dados alheios.
-    cloudsql_client_module._clients.pop(FINANCIADOR_TESTE_2, None)
-    tenant_config_module._cache.pop(FINANCIADOR_TESTE_2, None)
     monkeypatch.setenv(f"TENANT_{FINANCIADOR_TESTE_2}_CONFIG", os.environ[f"TENANT_{FINANCIADOR_TESTE}_CONFIG"])
 
     with pytest.raises(cloudsql_client_module.TenantMismatchError):
@@ -95,9 +105,6 @@ def test_get_db_single_flight_on_concurrent_first_access(monkeypatch):
     # pool de conexões nunca fechado. Aqui trocamos _create_engine por um
     # fake lento para alargar a janela de corrida e contamos quantas vezes
     # ele é de fato chamado.
-    cloudsql_client_module._clients.pop(FINANCIADOR_TESTE_3, None)
-    cloudsql_client_module._locks.pop(FINANCIADOR_TESTE_3, None)
-    tenant_config_module._cache.pop(FINANCIADOR_TESTE_3, None)
     monkeypatch.setenv(
         f"TENANT_{FINANCIADOR_TESTE_3}_CONFIG",
         os.environ[f"TENANT_{FINANCIADOR_TESTE}_CONFIG"],
@@ -129,9 +136,6 @@ def test_get_db_single_flight_on_concurrent_first_access(monkeypatch):
 
     assert call_count == 1  # engine construído uma única vez
     assert len({id(r) for r in results}) == 1  # todas as threads recebem o mesmo client
-
-    cloudsql_client_module._clients.pop(FINANCIADOR_TESTE_3, None)
-    cloudsql_client_module._locks.pop(FINANCIADOR_TESTE_3, None)
 
 
 def test_gte_lte_filters_range_query():
