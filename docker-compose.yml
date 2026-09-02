@@ -1,11 +1,12 @@
+# Alternativa a um PostgreSQL instalado localmente. O schema NÃO é carregado por
+# initdb: rode `python manage.py provisionar_tenant <cnpj>` com ADMIN_DB_CONFIG e
+# TENANT_<cnpj>_CONFIG apontando para localhost:5433.
 services:
   postgres:
-    image: postgres:16
+    image: postgres:17
     environment:
-      POSTGRES_USER: optin
+      POSTGRES_USER: optin_app
       POSTGRES_PASSWORD: optin
-      POSTGRES_DB: optin
+      POSTGRES_DB: postgres
     ports:
       - "5433:5432"
-    volumes:
-      - ./docker/initdb:/docker-entrypoint-initdb.d

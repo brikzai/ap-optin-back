@@ -3,6 +3,7 @@ django-cors-headers
 djangorestframework>=3.15
 python-dotenv
 sqlalchemy>=2.0
+sqlparse>=0.4
 pg8000
 cloud-sql-python-connector[pg8000]
 google-cloud-secret-manager
