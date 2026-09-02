@@ -74,6 +74,19 @@ def test_dry_run_nao_toca_o_banco(tmp_path, banco_descartavel):
     assert runner.aplicar(engine, tmp_path, dry_run=True) == ["0001_cria.sql"]
     with engine.connect() as conn:
         assert conn.exec_driver_sql("SELECT to_regclass('public.t')").scalar() is None
+        assert conn.exec_driver_sql("SELECT to_regclass('public.schema_aplicado')").scalar() is None
+
+
+def test_dry_run_com_ledger_existente_nao_aplica_nada(tmp_path, banco_descartavel):
+    engine, _ = banco_descartavel
+    _escreve(tmp_path, "0001_cria.sql", "CREATE TABLE t (id INT);")
+    runner.aplicar(engine, tmp_path)                      # cria ledger e aplica
+    _escreve(tmp_path, "0002_outra.sql", "CREATE TABLE t2 (id INT);")
+    assert runner.aplicar(engine, tmp_path, dry_run=True) == ["0002_outra.sql"]
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql("SELECT to_regclass('public.t2')").scalar() is None
+        aplicadas = conn.exec_driver_sql("SELECT arquivo FROM schema_aplicado ORDER BY arquivo").scalars().all()
+    assert aplicadas == ["0001_cria.sql"]
 
 
 def test_split_respeita_dollar_quoting(tmp_path, banco_descartavel):

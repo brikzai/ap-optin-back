@@ -55,10 +55,19 @@ def aplicadas(conn) -> dict:
     return {arquivo: chk for arquivo, chk in rows}
 
 
-def pendentes(engine, diretorio: Path) -> list:
+def _ledger_existe(conn) -> bool:
+    return bool(conn.execute(text(f"SELECT to_regclass('public.{LEDGER}') IS NOT NULL")).scalar())
+
+
+def pendentes(engine, diretorio: Path, criar_ledger: bool = True) -> list:
     with engine.begin() as conn:
-        garantir_ledger(conn)
-        ja = aplicadas(conn)
+        if criar_ledger:
+            garantir_ledger(conn)
+            ja = aplicadas(conn)
+        elif _ledger_existe(conn):
+            ja = aplicadas(conn)
+        else:
+            ja = {}
     restantes = []
     for arquivo in listar_migrations(diretorio):
         chk = checksum(arquivo.read_text(encoding="utf-8"))
@@ -75,7 +84,7 @@ def pendentes(engine, diretorio: Path) -> list:
 
 def aplicar(engine, diretorio: Path, dry_run: bool = False) -> list:
     nomes = []
-    for arquivo in pendentes(engine, diretorio):
+    for arquivo in pendentes(engine, diretorio, criar_ledger=not dry_run):
         nomes.append(arquivo.name)
         if dry_run:
             continue
