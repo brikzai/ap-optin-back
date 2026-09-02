@@ -1,5 +1,7 @@
 # Multi-tenancy — Design de implementação (um tenant por financiador)
 
+> **Substituída em parte** por `2026-09-02-database-multitenant-migrations-design.md`: registro de tenants (`TENANT_IDS`), banco lógico por tenant (`ap_<cnpj>`), provisionamento, migrations e guarda `tenant_info`. O formato de `TENANT_{cnpj}_CONFIG` continua válido, acrescido de `database_url` opcional.
+
 > **Status:** aprovado em brainstorming, pronto para plano de implementação.
 > **Fonte normativa:** `SPEC-01-optin-e-gestao.md` (§3 autenticação, §4 contratos CERC, §5 API interna, §6 modelo de dados) + `2026-08-18-optin-service-design.md` (decisões de stack já tomadas — sem ORM, sem DRF, Cloud Run). Este documento **estende** essas decisões para múltiplos tenants (financiadores); não repete o que já está lá.
 
