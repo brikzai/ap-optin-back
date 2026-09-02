@@ -35,9 +35,18 @@ Este é o padrão atual: um cluster PostgreSQL rodando em modo user-owned, sem p
 
 ```sql
 CREATE ROLE optin_app LOGIN PASSWORD 'optin' CREATEDB;
+GRANT pg_signal_backend TO optin_app;
 ```
 
 A role `optin_app` precisa de `CREATEDB` porque o comando `provisionar_tenant` cria novos bancos.
+
+`pg_signal_backend` é para os testes: `apps/tenants/tests/*` derrubam bancos descartáveis com
+`DROP DATABASE ... WITH (FORCE)`, que precisa terminar qualquer backend ainda conectado ao banco
+(ex.: um worker de autovacuum, que roda como role interna do cluster). Sem essa concessão, o drop
+falha intermitentemente com `42501 permissão negada para terminar o processo` — não é um teste
+flaky, é falta de privilégio (medido: ~1 em 100 execuções, porque depende do autovacuum ainda
+estar conectado no instante do drop). Não afeta código de produção — `provisionar_tenant` nunca
+dá `DROP`, só cria.
 
 ### Alternativa: serviço Windows (requer administrador)
 
