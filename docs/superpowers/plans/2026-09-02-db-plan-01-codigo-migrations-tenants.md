@@ -601,7 +601,9 @@ def _engine_admin():
 
 def _url_para(nome_banco: str) -> str:
     admin_url = json.loads(os.environ["ADMIN_DB_CONFIG"])["database_url"]
-    return str(sqlalchemy.engine.make_url(admin_url).set(database=nome_banco))
+    # render_as_string(hide_password=False) é obrigatório: str(URL) mascara a
+    # senha como "***" e o pg8000 mandaria "***" para o servidor (erro 28P01).
+    return sqlalchemy.engine.make_url(admin_url).set(database=nome_banco).render_as_string(hide_password=False)
 
 
 @pytest.fixture
@@ -789,10 +791,21 @@ def aplicadas(conn) -> dict:
     return {arquivo: chk for arquivo, chk in rows}
 
 
-def pendentes(engine, diretorio: Path) -> list:
+def _ledger_existe(conn) -> bool:
+    return bool(conn.execute(text(f"SELECT to_regclass('public.{LEDGER}') IS NOT NULL")).scalar())
+
+
+def pendentes(engine, diretorio: Path, criar_ledger: bool = True) -> list:
+    # criar_ledger=False (dry-run) NÃO escreve nada: spec §4.3 diz que --dry-run
+    # só imprime, então nem a tabela de ledger pode ser criada como efeito colateral.
     with engine.begin() as conn:
-        garantir_ledger(conn)
-        ja = aplicadas(conn)
+        if criar_ledger:
+            garantir_ledger(conn)
+            ja = aplicadas(conn)
+        elif _ledger_existe(conn):
+            ja = aplicadas(conn)
+        else:
+            ja = {}
     restantes = []
     for arquivo in listar_migrations(diretorio):
         chk = checksum(arquivo.read_text(encoding="utf-8"))
@@ -809,7 +822,7 @@ def pendentes(engine, diretorio: Path) -> list:
 
 def aplicar(engine, diretorio: Path, dry_run: bool = False) -> list:
     nomes = []
-    for arquivo in pendentes(engine, diretorio):
+    for arquivo in pendentes(engine, diretorio, criar_ledger=not dry_run):
         nomes.append(arquivo.name)
         if dry_run:
             continue
@@ -988,15 +1001,13 @@ def config_admin() -> dict:
     return json.loads(get_secret("ADMIN_DB_CONFIG"))
 
 
-def banco_existe(engine_admin, nome: str) -> bool:
-    with engine_admin.connect() as conn:
-        return conn.execute(text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": nome}).scalar() is not None
+def banco_existe(conn, nome: str) -> bool:
+    return conn.execute(text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": nome}).scalar() is not None
 
 
-def criar_banco(engine_admin, nome: str) -> None:
+def criar_banco(conn, nome: str) -> None:
     registry.nome_banco(nome.removeprefix("ap_"))  # revalida o formato antes de interpolar
-    with engine_admin.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-        conn.exec_driver_sql(f'CREATE DATABASE "{nome}"')
+    conn.exec_driver_sql(f'CREATE DATABASE "{nome}"')
 
 
 def garantir_tenant_info(engine, financiador_id: str) -> None:
@@ -1024,14 +1035,22 @@ def provisionar(financiador_id: str, existente: bool = False) -> list:
         raise registry.RegistroTenantsInvalido(f"{financiador_id} e {colisao} apontam para o mesmo banco")
 
     nome = registry.nome_banco(financiador_id)
-    engine_admin = _create_engine(config_admin())
+    # Engine SEMPRE via _create_engine (trata database_url e Cloud SQL Connector),
+    # com AUTOCOMMIT porque CREATE DATABASE não roda em transação.
+    #
+    # UMA única conexão para checar e criar: numa conexão RECICLADA do pool o
+    # AUTOCOMMIT não vale a tempo (o pool_pre_ping roda antes) e o CREATE DATABASE
+    # falha com 25001 "não pode ser executado dentro de um bloco de transação".
+    # Não separe isto em duas conexões.
+    engine_admin = _create_engine(config_admin()).execution_options(isolation_level="AUTOCOMMIT")
     try:
-        if banco_existe(engine_admin, nome):
-            if not existente:
-                raise BancoJaExiste(f"{nome} já existe (use --existente para reaproveitar)")
-        else:
-            criar_banco(engine_admin, nome)
-            logger.info("[provisionar] banco %s criado", nome)
+        with engine_admin.connect() as conn:
+            if banco_existe(conn, nome):
+                if not existente:
+                    raise BancoJaExiste(f"{nome} já existe (use --existente para reaproveitar)")
+            else:
+                criar_banco(conn, nome)
+                logger.info("[provisionar] banco %s criado", nome)
     finally:
         engine_admin.dispose()
 
