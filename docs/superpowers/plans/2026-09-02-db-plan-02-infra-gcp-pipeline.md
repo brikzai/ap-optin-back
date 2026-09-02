@@ -223,7 +223,7 @@ gcloud sql instances create optin-pg \
   --region=southamerica-east1 --availability-type=ZONAL \
   --storage-type=SSD --storage-size=10GB --storage-auto-increase \
   --backup-start-time=03:00 --enable-point-in-time-recovery --retained-backups-count=7 \
-  --assign-ip --deletion-protection
+  --assign-ip --deletion-protection --ssl-mode=ENCRYPTED_ONLY
 ```
 Verify: `gcloud sql instances describe optin-pg --format="value(state,databaseVersion,settings.tier,connectionName,settings.ipConfiguration.authorizedNetworks)"`
 Expected: `RUNNABLE  POSTGRES_17  db-g1-small  brikz-ap:southamerica-east1:optin-pg` e redes autorizadas **vazias**.
@@ -259,7 +259,7 @@ Acrescente ao `docs/runbooks/gcp-setup.md`:
       --region=southamerica-east1 --availability-type=ZONAL \
       --storage-type=SSD --storage-size=10GB --storage-auto-increase \
       --backup-start-time=03:00 --enable-point-in-time-recovery --retained-backups-count=7 \
-      --assign-ip --deletion-protection
+      --assign-ip --deletion-protection --ssl-mode=ENCRYPTED_ONLY
 
 Sem `--authorized-networks`: acesso só via Cloud SQL Connector (IAM + TLS).
 
@@ -551,12 +551,15 @@ steps:
       - -c
       - |
         set -euo pipefail
+        # $$ escapa o $ da substituição do Cloud Build (que roda ANTES do shell):
+        # sem isso, ${job%%:*}/${job##*:} são lidos como chaves de substituição
+        # inexistentes e o build é rejeitado no submit.
         for job in migrate-tenants:migrate_tenants optin-manage:check; do
-          nome="${job%%:*}"; comando="${job##*:}"
-          gcloud run jobs deploy "$nome" \
+          nome="$${job%%:*}"; comando="$${job##*:}"
+          gcloud run jobs deploy "$$nome" \
             --image "${_IMAGE}:${_TAG}" --region "${_REGION}" \
             --service-account "${_RUNTIME_SA}" \
-            --command python --args "manage.py,$comando" \
+            --command python --args "manage.py,$$comando" \
             --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID,ENVIRONMENT=${_ENVIRONMENT},ALLOWED_HOSTS=*" \
             --max-retries 0 --task-timeout 600 --tasks 1 --quiet
         done
@@ -603,10 +606,16 @@ substitutions:
   _CERC_API_BASE_URL: https://ap-homolog.cerc.inf.br
 
 serviceAccount: projects/brikz-ap/serviceAccounts/optin-build@brikz-ap.iam.gserviceaccount.com
+# Sem isto o build usa o default de 600s (10min), apertado para build+push+2 jobs+
+# migrate-tenants+deploy — um migrate lento sozinho já consome o orçamento inteiro.
+timeout: 1800s
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: E2_HIGHCPU_8
 ```
+
+Além disso: crie/atualize `.dockerignore` e `.gcloudignore` para excluir explicitamente `keys/` e
+`**/*.pem` (um `*.pem` sozinho não casa em subdiretório — `keys/homolog/jwt_private.pem` escaparia).
 
 - [ ] **Step 2: Validar sintaxe e substituições sem executar**
 

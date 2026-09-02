@@ -46,6 +46,9 @@ de `ADMIN_DB_CONFIG` **e** de cada `TENANT_<cnpj>_CONFIG`; reiniciar o service (
 
 Feito em 2026-09-02: instância `optin-pg` `RUNNABLE` (`brikz-ap:southamerica-east1:optin-pg`), redes
 autorizadas vazias, usuário `optin_app` criado, segredo `ADMIN_DB_CONFIG` versão 1.
+`ssl_mode=ENCRYPTED_ONLY` aplicado (revisão pós-Task 6): TLS obrigatório, sem exigir certificado de
+cliente — no-op para o Connector (que já faz mTLS por conta própria), fecha a brecha de conexão em
+texto puro caso uma rede autorizada seja liberada no futuro (`gcloud sql instances patch optin-pg --ssl-mode=ENCRYPTED_ONLY`).
 
 ## 3. Service accounts e IAM
 
@@ -104,3 +107,17 @@ Logs: `gcloud run jobs executions list --job migrate-tenants --region southameri
 Feito em 2026-09-02: `cloudbuild.yaml` escrito e validado (5 steps, 9 substituições) — **ainda não executado**.
 O passo `migrate` falharia por `TENANT_IDS` inexistente; primeiro `gcloud builds submit` real é o Plan 03,
 depois de criar os segredos do primeiro tenant (seção 6, a escrever).
+
+**Revisão pós-Task 6 (verificação do estado real no GCP contra o plano) achou e corrigiu, antes de
+qualquer `gcloud builds submit`:**
+- **Crítico:** `${job%%:*}`/`${job##*:}` no step `deploy-jobs` seriam lidos pelo parser de substituições
+  do Cloud Build (que roda antes do shell) como chaves inexistentes — o build seria rejeitado no submit.
+  `python -c "import yaml..."` valida só sintaxe YAML, nunca pegaria isso. Corrigido escapando para `$$`.
+- **Importante:** sem `timeout:` no nível raiz, o build usaria o default de 600s — apertado para
+  build+push+2 jobs+migrate+deploy. Adicionado `timeout: 1800s`.
+- **Importante:** `.dockerignore`/`.gcloudignore` com `*.pem` sozinho não cobre `keys/homolog/jwt_private.pem`
+  (Docker não casa `*.pem` em subdiretório sem `**/`). Só não vazava pro contexto de build por acidente
+  (fallback do `gcloud` para `.gitignore`, que tem `keys/`). Adicionado `**/*.pem` e `keys/` explícitos nos
+  dois arquivos, e criado `.gcloudignore` explícito em vez de depender do fallback.
+- **Importante** (não é código, é o próprio Cloud SQL): `ssl_mode` estava `ALLOW_UNENCRYPTED_AND_ENCRYPTED`.
+  Corrigido para `ENCRYPTED_ONLY` (seção 2 acima).
