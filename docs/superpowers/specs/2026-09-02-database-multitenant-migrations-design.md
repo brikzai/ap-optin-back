@@ -22,7 +22,7 @@
 | Migrations | **SQL puro versionado + runner próprio por tenant** (`migrate_tenants`), alinhado ao `scripts/apply_schema.py` que `ap-back-consulta-agenda` e `ap-back-contratos` já usam (ledger `schema_aplicado` com checksum) | *Nenhuma ferramenta (estado anterior):* `ALTER TABLE` na mão, repetido por tenant, sem controle de versão — foi a dor concreta nº 1. *Alembic:* framework a mais para ~60 linhas de runner. |
 | Infra GCP | **Projeto novo por ambiente** (`ap-optin-homolog` agora, `ap-optin-prod` depois), região `southamerica-east1`, provisionado por runbook `gcloud` executado via CLI (§10) | *Reaproveitar `registradora-506000`:* descartado — o recomeço inclui a infra, separada do projeto antigo. *Um projeto para homolog+prod:* mistura credenciais reais da CERC com as de homolog. *Terraform:* nenhum irmão usa; YAGNI para 1 projeto e meia dúzia de recursos. |
 | Garantia de isolamento | **Estrutural, em runtime** (`tenant_info` validado por `get_db`) | *Disciplina no `.env`/Secret Manager (estado anterior):* causou incidente real — dois tenants no mesmo banco, suíte de testes apagou opt-ins reais. |
-| Testes | **Postgres local via Docker**, mesmo runner de migrations | *Cloud SQL real do tenant de dev (estado anterior):* lento, custa, e foi o vetor do incidente acima. |
+| Testes | **Postgres local** (PostgreSQL 17 instalado; Docker opcional), mesmo runner de migrations | *Cloud SQL real do tenant de dev (estado anterior):* lento, custa, e foi o vetor do incidente acima. |
 
 O diagnóstico que levou a isto: "sem ORM" era defensável; o erro foi empacotar junto "sem ferramenta de migration" e "sem garantia estrutural de isolamento". As duas dores reais que apareceram não vêm de escrever SQL — vêm da ausência dessas duas peças. Este documento adiciona as duas sem mexer no estilo de acesso a dados.
 
@@ -180,12 +180,13 @@ Fora, de propósito: `consulta_agenda`/`consulta_agenda_ur` (SPEC-03), `tenant_i
 
 ## 7. Testes e dev local
 
-- `docker-compose.yml` mantém só o container `postgres:16` na porta 5433, **sem** volume `initdb`.
+- Postgres local = **PostgreSQL 17 instalado como serviço Windows** (`postgresql-x64-17`, porta 5432) — não há Docker nesta máquina. `docker-compose.yml` fica como alternativa para quem tiver Docker (container `postgres:17`, porta 5433, **sem** volume `initdb`). Cloud SQL também em Postgres 17 (§10.2), para local = nuvem.
+- Role local `optin_app` (senha `optin`, `CREATEDB`) criada uma vez pelo superusuário `postgres`.
 - `.env` local:
   ```
   TENANT_IDS=12345678000199
-  TENANT_12345678000199_CONFIG={"database_url":"postgresql+pg8000://optin:optin@localhost:5433/ap_12345678000199", "cerc_client_id":"...", ...}
-  ADMIN_DB_CONFIG={"database_url":"postgresql+pg8000://optin:optin@localhost:5433/postgres"}
+  TENANT_12345678000199_CONFIG={"database_url":"postgresql+pg8000://optin_app:optin@localhost:5432/ap_12345678000199", "cerc_client_id":"...", ...}
+  ADMIN_DB_CONFIG={"database_url":"postgresql+pg8000://optin_app:optin@localhost:5432/postgres"}
   ```
 - Setup de teste (fixture de sessão do pytest, ou script `make test-db`): `provisionar_tenant 12345678000199` (idempotente com `--existente`) + `migrate_tenants`. Mesmo runner, mesmo schema que produção.
 - **A suíte automatizada nunca mais aponta para Cloud SQL real.** Testes de integração contra a CERC de homologação continuam existindo, mas são marcados (`@pytest.mark.homolog`) e rodam só sob demanda, contra um tenant local — a CERC é externa, o banco não precisa ser.
@@ -222,7 +223,7 @@ Segue o molde dos irmãos (`etl-back-elegibility/cloudbuild.yaml`): infra criada
 
 ### 10.2 Cloud SQL (uma instância)
 
-- `optin-pg`, Postgres 16, `db-g1-small` (homolog; prod dimensiona à parte), IP público **sem redes autorizadas** — acesso só via Cloud SQL Connector (IAM + TLS), como os irmãos. Backups automáticos + point-in-time recovery ligados; `deletion-protection` ligado.
+- `optin-pg`, Postgres 17 (mesma versão do Postgres local, §7), `db-g1-small` (homolog; prod dimensiona à parte), IP público **sem redes autorizadas** — acesso só via Cloud SQL Connector (IAM + TLS), como os irmãos. Backups automáticos + point-in-time recovery ligados; `deletion-protection` ligado.
 - Role de aplicação **`optin_app`** com `CREATEDB` (senha gerada, guardada só no Secret Manager). Serve para a app (§2.4) e para `ADMIN_DB_CONFIG` (§2.3, banco `postgres`). Sem role por tenant.
 - Nenhum banco lógico criado pelo runbook — bancos são criados por `provisionar_tenant` (§3).
 
