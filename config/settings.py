@@ -7,7 +7,10 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-secret-key-change-in-production")
-DEBUG = os.getenv("ENVIRONMENT", "development").lower() != "production"
+# DEBUG só em desenvolvimento local. homolog/production rodam com DEBUG=False
+# (sem stack trace na resposta, CORS por lista explícita) — spec 2026-09-02 §10.5.
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
+DEBUG = ENVIRONMENT == "development"
 ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "*").split(",")
 
 INSTALLED_APPS = [
@@ -51,10 +54,15 @@ LOGGING = {
     "root": {"handlers": ["console"], "level": "INFO"},
 }
 
-# CORS — origens da SPA que consome esta API (ap-front). Config direta via
-# env var (não é segredo, não passa por shared/secrets.py — mesmo padrão já
-# usado para ALLOWED_HOSTS acima).
+# CORS — dev: qualquer localhost (vite muda de porta). Demais ambientes: só as
+# origens listadas em CORS_ALLOWED_ORIGINS (separadas por vírgula).
+if DEBUG:
+    CORS_ALLOWED_ORIGIN_REGEXES = [r"^http://localhost:\d+$", r"^http://127\.0\.0\.1:\d+$"]
+    CORS_ALLOWED_ORIGINS = []
+else:
+    CORS_ALLOWED_ORIGIN_REGEXES = []
+    CORS_ALLOWED_ORIGINS = [o for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o]
+
 from corsheaders.defaults import default_headers
 
-CORS_ALLOWED_ORIGINS = [o for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o]
 CORS_ALLOW_HEADERS = list(default_headers) + ["idempotency-key"]

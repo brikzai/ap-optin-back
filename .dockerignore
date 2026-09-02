@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+.claude
+.superpowers
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+docs
+docker
+docker-compose.yml
+*.pem
+logs
