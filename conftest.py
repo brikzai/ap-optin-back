@@ -20,6 +20,18 @@ def _tenant_de_teste_provisionado():
     if FINANCIADOR_TESTE not in (os.getenv("TENANT_IDS") or ""):
         pytest.exit(f"TENANT_IDS sem {FINANCIADOR_TESTE} — configure o .env (ver .env.example)")
 
+    from sqlalchemy.engine import make_url
+
+    from shared.tenant_config import get_tenant_config
+
+    config = get_tenant_config(FINANCIADOR_TESTE)
+    url = config.get("database_url")
+    if not url or make_url(url).host not in ("localhost", "127.0.0.1", "::1"):
+        pytest.exit(
+            f"tenant de teste {FINANCIADOR_TESTE} não aponta para um Postgres local — "
+            "a suíte é destrutiva e nunca deve rodar contra Cloud SQL (spec §7)"
+        )
+
     from apps.tenants.provisioning import provisionar
 
     provisionar(FINANCIADOR_TESTE, existente=True)

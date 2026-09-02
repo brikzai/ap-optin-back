@@ -26,6 +26,19 @@ def test_listar_migrations_rejeita_nome_fora_do_padrao(tmp_path, nome):
         runner.listar_migrations(tmp_path)
 
 
+def test_listar_migrations_ignora_markdown(tmp_path):
+    _escreve(tmp_path, "0001_a.sql", "select 1;")
+    (tmp_path / "README.md").write_text("convenção de nomes", encoding="utf-8")
+    assert [p.name for p in runner.listar_migrations(tmp_path)] == ["0001_a.sql"]
+
+
+def test_listar_migrations_rejeita_numero_duplicado(tmp_path):
+    _escreve(tmp_path, "0001_a.sql", "select 1;")
+    _escreve(tmp_path, "0001_b.sql", "select 1;")
+    with pytest.raises(NomeMigrationInvalido):
+        runner.listar_migrations(tmp_path)
+
+
 def test_aplicar_cria_ledger_e_aplica_em_ordem(tmp_path, banco_descartavel):
     engine, _ = banco_descartavel
     _escreve(tmp_path, "0001_cria.sql", "CREATE TABLE t (id INT PRIMARY KEY);")

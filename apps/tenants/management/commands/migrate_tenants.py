@@ -1,8 +1,15 @@
+import re
+
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.tenants import registry, runner
 from shared.cloudsql_client import _create_engine, _verificar_tenant
 from shared.tenant_config import get_tenant_config
+
+
+def _mensagem_segura(e: Exception) -> str:
+    # Um ArgumentError de URL malformada ecoa a URL inteira, com senha.
+    return re.sub(r"://[^/\s]*:[^/\s]*@", "://***:***@", f"{type(e).__name__}: {e}")
 
 
 class Command(BaseCommand):
@@ -32,7 +39,7 @@ class Command(BaseCommand):
                     engine.dispose()
             except Exception as e:  # um tenant não pode impedir os outros
                 falhas.append(cnpj)
-                self.stderr.write(f"[migrate] {cnpj}: ERRO {e}")
+                self.stderr.write(f"[migrate] {cnpj}: ERRO {_mensagem_segura(e)}")
                 continue
             verbo = "seria aplicada" if opts["dry_run"] else "aplicada"
             for a in aplicadas:

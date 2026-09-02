@@ -1,6 +1,8 @@
 -- 0001_baseline.sql — estado consolidado do schema no recomeço do zero (2026-09-02).
 -- Fonte: SPEC-01 §6 + design 2026-08-25 (cliente) + design 2026-09-02 §6.
 -- Forward-only. Não edite este arquivo depois de aplicado: crie 0002_*.sql.
+-- Cuidado com pg8000: o runner aplica via conn.exec_driver_sql, que trata '%' como
+-- marcador de parâmetro. Uma futura migration com LIKE '%x' precisa escrever '%%x'.
 
 CREATE TABLE cliente (
   id             TEXT PRIMARY KEY,

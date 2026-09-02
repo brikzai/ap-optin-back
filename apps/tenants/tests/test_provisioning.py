@@ -79,6 +79,26 @@ def test_provisionar_recusa_cnpj_fora_de_tenant_ids(monkeypatch):
         provisioning.provisionar(CNPJ_A)
 
 
+def test_provisionar_recusa_colisao_com_banco_de_outro_tenant_ja_registrado(monkeypatch):
+    # Guarda de colisão (registry.detectar_colisao) exercitada de ponta a ponta
+    # dentro de provisionar — não só isoladamente em test_registry.py.
+    #
+    # Subtileza: validar_config roda ANTES de detectar_colisao dentro de
+    # provisionar, e validar_config rejeita qualquer config cujo banco não
+    # seja ap_<próprio cnpj>. Por isso o cenário não pode ser "B aponta pro
+    # banco de A" — validar_config(B, ...) já rejeitaria isso sem nunca
+    # chegar em detectar_colisao. Em vez disso: o tenant sendo provisionado
+    # (A) tem config corretamente nomeada (ap_<CNPJ_A>, passa validar_config);
+    # é um OUTRO tenant já registrado (B) que tem sua config apontando pro
+    # MESMO banco de A. detectar_colisao é o único guard capaz de pegar isso.
+    monkeypatch.setenv("TENANT_IDS", f"{CNPJ_A},{CNPJ_B}")
+    _configura(monkeypatch, CNPJ_A, f"ap_{CNPJ_A}")
+    _configura(monkeypatch, CNPJ_B, f"ap_{CNPJ_A}")  # mesmo banco de A — colisão
+    with pytest.raises(RegistroTenantsInvalido) as exc:
+        provisioning.provisionar(CNPJ_A)
+    assert CNPJ_A in str(exc.value) and CNPJ_B in str(exc.value) and "mesmo banco" in str(exc.value)
+
+
 def test_garantir_tenant_info_recusa_outro_dono(banco_descartavel):
     engine, _ = banco_descartavel
     provisioning.garantir_tenant_info(engine, CNPJ_A)

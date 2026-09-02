@@ -168,6 +168,45 @@ def test_gte_lte_filters_range_query():
         db.table("dominio_arranjo").delete().eq("codigo", "GTE2").execute()
 
 
+def test_get_db_recusa_banco_sem_tenant_info(monkeypatch):
+    # Banco existe mas nunca foi provisionado: o operador tem que receber
+    # TenantMismatchError com instrução, não um erro cru de relação inexistente.
+    import json
+
+    import sqlalchemy
+
+    from apps.tenants.provisioning import config_admin
+
+    nome = "ap_44444444000191"
+    admin = cloudsql_client_module._create_engine(config_admin()).execution_options(isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(f'DROP DATABASE IF EXISTS "{nome}" WITH (FORCE)')
+            conn.exec_driver_sql(f'CREATE DATABASE "{nome}"')
+    finally:
+        admin.dispose()
+
+    url = sqlalchemy.engine.make_url(
+        json.loads(os.environ["ADMIN_DB_CONFIG"])["database_url"]
+    ).set(database=nome).render_as_string(hide_password=False)
+    monkeypatch.setenv("TENANT_44444444000191_CONFIG", json.dumps({"database_url": url}))
+
+    try:
+        with pytest.raises(cloudsql_client_module.TenantMismatchError) as exc:
+            get_db("44444444000191")
+        assert "provisionar_tenant" in str(exc.value)
+        assert "44444444000191" not in cloudsql_client_module._clients
+    finally:
+        cloudsql_client_module._clients.pop("44444444000191", None)
+        cloudsql_client_module._locks.pop("44444444000191", None)
+        admin = cloudsql_client_module._create_engine(config_admin()).execution_options(isolation_level="AUTOCOMMIT")
+        try:
+            with admin.connect() as conn:
+                conn.exec_driver_sql(f'DROP DATABASE IF EXISTS "{nome}" WITH (FORCE)')
+        finally:
+            admin.dispose()
+
+
 @pytest.mark.sem_banco
 def test_create_engine_usa_database_url_quando_presente():
     # create_engine é lazy: não conecta, só monta a URL — dá pra testar sem banco.

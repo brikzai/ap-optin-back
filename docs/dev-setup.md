@@ -6,27 +6,29 @@
 
 Este é o padrão atual: um cluster PostgreSQL rodando em modo user-owned, sem precisar de privilégios de administrador do Windows.
 
-**Localização do cluster:** `C:\Users\rdeli\pgdata-optin17`  
-**Superuser:** `postgres` (senha `postgres`)  
+`<PGDATA>` = diretório de dados do cluster local (ex.: `%USERPROFILE%\pgdata-optin17`).
+
+**Localização do cluster:** `<PGDATA>`  
+**Superuser:** `postgres` (senha definida por você ao rodar `initdb`)  
 **Autenticação:** SCRAM-SHA-256  
 **Porta:** 5432
 
 **Iniciar o cluster** (sem administrador, executar após qualquer reboot):
 
 ```powershell
-& "C:\Program Files\PostgreSQL\17\bin\pg_ctl.exe" -D "C:\Users\rdeli\pgdata-optin17" -l "C:\Users\rdeli\pgdata-optin17\server.log" start
+& "C:\Program Files\PostgreSQL\17\bin\pg_ctl.exe" -D "<PGDATA>" -l "<PGDATA>\server.log" start
 ```
 
 **Parar o cluster:**
 
 ```powershell
-& "C:\Program Files\PostgreSQL\17\bin\pg_ctl.exe" -D "C:\Users\rdeli\pgdata-optin17" stop
+& "C:\Program Files\PostgreSQL\17\bin\pg_ctl.exe" -D "<PGDATA>" stop
 ```
 
 **Verificar status:**
 
 ```powershell
-& "C:\Program Files\PostgreSQL\17\bin\pg_ctl.exe" -D "C:\Users\rdeli\pgdata-optin17" status
+& "C:\Program Files\PostgreSQL\17\bin\pg_ctl.exe" -D "<PGDATA>" status
 ```
 
 **Role de aplicação** (já criada, uma vez via `postgres`):
@@ -91,6 +93,8 @@ python manage.py migrate_tenants --dry-run
 ```
 
 O ledger de aplicação vive em `schema_aplicado (arquivo, checksum, aplicado_em)` dentro de cada banco de tenant. Editar um arquivo já aplicado é erro por design.
+
+**Cuidado com pg8000:** o runner aplica cada statement via `conn.exec_driver_sql`, que trata `%` como marcador de parâmetro. Uma migration com `LIKE '%x'` precisa escrever `LIKE '%%x'`.
 
 ## Testes
 

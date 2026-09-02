@@ -28,11 +28,18 @@ class NomeMigrationInvalido(RuntimeError):
     pass
 
 
-def listar_migrations(diretorio: Path) -> list:
-    arquivos = sorted(p for p in Path(diretorio).iterdir() if p.is_file())
+def listar_migrations(diretorio: Path) -> list[Path]:
+    arquivos = sorted(p for p in Path(diretorio).iterdir() if p.is_file() and p.suffix != ".md")
+    numeros = {}
     for p in arquivos:
         if not _NOME.match(p.name):
             raise NomeMigrationInvalido(f"{p.name}: esperado NNNN_descricao_snake.sql")
+        numero = p.name[:4]
+        if numero in numeros:
+            raise NomeMigrationInvalido(
+                f"número {numero} duplicado: {numeros[numero]} e {p.name} — cada migration precisa de um número único"
+            )
+        numeros[numero] = p.name
     return arquivos
 
 
@@ -59,7 +66,7 @@ def _ledger_existe(conn) -> bool:
     return bool(conn.execute(text(f"SELECT to_regclass('public.{LEDGER}') IS NOT NULL")).scalar())
 
 
-def pendentes(engine, diretorio: Path, criar_ledger: bool = True) -> list:
+def pendentes(engine, diretorio: Path, criar_ledger: bool = True) -> list[Path]:
     with engine.begin() as conn:
         if criar_ledger:
             garantir_ledger(conn)
@@ -82,7 +89,7 @@ def pendentes(engine, diretorio: Path, criar_ledger: bool = True) -> list:
     return restantes
 
 
-def aplicar(engine, diretorio: Path, dry_run: bool = False) -> list:
+def aplicar(engine, diretorio: Path, dry_run: bool = False) -> list[str]:
     nomes = []
     for arquivo in pendentes(engine, diretorio, criar_ledger=not dry_run):
         nomes.append(arquivo.name)

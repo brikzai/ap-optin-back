@@ -49,12 +49,15 @@ def garantir_tenant_info(engine, financiador_id: str) -> None:
         """))
         dono = conn.execute(text("SELECT financiador_id FROM tenant_info")).scalar()
         if dono is None:
-            conn.execute(text("INSERT INTO tenant_info (financiador_id) VALUES (:f)"), {"f": financiador_id})
+            conn.execute(
+                text("INSERT INTO tenant_info (financiador_id) VALUES (:f) ON CONFLICT (financiador_id) DO NOTHING"),
+                {"f": financiador_id},
+            )
         elif dono != financiador_id:
             raise TenantInfoDivergente(f"banco já pertence ao tenant {dono}, não a {financiador_id}")
 
 
-def provisionar(financiador_id: str, existente: bool = False) -> list:
+def provisionar(financiador_id: str, existente: bool = False) -> list[str]:
     if financiador_id not in registry.tenant_ids():
         raise registry.RegistroTenantsInvalido(f"{financiador_id} não está em TENANT_IDS")
     config = get_tenant_config(financiador_id)

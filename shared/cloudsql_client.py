@@ -186,10 +186,17 @@ class TenantMismatchError(RuntimeError):
 
 
 def _verificar_tenant(engine, financiador_id: str) -> None:
+    import sqlalchemy
     from sqlalchemy import text
 
-    with engine.connect() as conn:
-        dono = conn.execute(text("SELECT financiador_id FROM tenant_info")).scalar()
+    try:
+        with engine.connect() as conn:
+            dono = conn.execute(text("SELECT financiador_id FROM tenant_info")).scalar()
+    except sqlalchemy.exc.ProgrammingError as e:
+        raise TenantMismatchError(
+            f"banco configurado para {financiador_id} não tem a tabela tenant_info — "
+            f"provavelmente nunca foi provisionado (rode: manage.py provisionar_tenant {financiador_id})"
+        ) from e
     if dono != financiador_id:
         raise TenantMismatchError(
             f"banco configurado para {financiador_id} pertence a {dono!r} — "
@@ -222,9 +229,14 @@ def _create_engine(config: dict):
         )
 
     logger.info("[CloudSQL] Engine criado para tenant (connection=%s)", config["cloudsql_connection_name"])
-    return sqlalchemy.create_engine(
+    engine = sqlalchemy.create_engine(
         "postgresql+pg8000://", creator=getconn, pool_size=5, max_overflow=2, pool_timeout=30, pool_recycle=1800,
     )
+    # engine.dispose() NÃO fecha o Connector (ele mantém um event loop asyncio em
+    # thread própria). Sem isto, cada get_db que falha na guarda de tenant vazaria
+    # uma thread por requisição — spec §5 quer a falha ruidosa, não acumulativa.
+    sqlalchemy.event.listen(engine, "engine_disposed", lambda _e: connector.close())
+    return engine
 
 
 _meta_lock = threading.Lock()

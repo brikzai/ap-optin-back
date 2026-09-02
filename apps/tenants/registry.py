@@ -20,7 +20,7 @@ class RegistroTenantsInvalido(RuntimeError):
     pass
 
 
-def tenant_ids() -> list:
+def tenant_ids() -> list[str]:
     bruto = get_secret("TENANT_IDS")
     ids = []
     for parte in bruto.split(","):
