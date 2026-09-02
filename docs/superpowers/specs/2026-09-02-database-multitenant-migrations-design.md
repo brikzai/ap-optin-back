@@ -20,7 +20,7 @@
 | Isolamento | **Um banco lógico Postgres por tenant** (`CREATE DATABASE`), numa **única instância Cloud SQL** | *RLS em banco compartilhado:* complexidade e risco de vazamento sem ganho com 6 tenants. *Instância por tenant:* custo ×6 sem exigência contratual hoje. Se um financiador exigir infra dedicada, o tenant é promovido a instância própria mudando só a config (`cloudsql_connection_name`) — sem mudar código. |
 | Acesso a dados | **Sem Django ORM** — mantém `shared/cloudsql_client.py` (`QueryBuilder` + SQL parametrizado via SQLAlchemy Core/pg8000) | *Django ORM com router por contextvar:* tecnicamente viável e seguro, mas este seria o **único de cinco repos** do mesmo time com ORM. Verificado em disco em 2026-09-02: `etl-back-ingestion-main`, `etl-back-elegibility`, `ap-back-consulta-agenda`, `ap-back-contratos` — todos `DATABASES = {}`, sem `models.py`, sem `migrations/`. *SQLAlchemy ORM + Alembic:* mesma divergência; revisitar só se a SPEC-03 (agenda/URs) trouxer modelo relacional bem mais denso. |
 | Migrations | **SQL puro versionado + runner próprio por tenant** (`migrate_tenants`), alinhado ao `scripts/apply_schema.py` que `ap-back-consulta-agenda` e `ap-back-contratos` já usam (ledger `schema_aplicado` com checksum) | *Nenhuma ferramenta (estado anterior):* `ALTER TABLE` na mão, repetido por tenant, sem controle de versão — foi a dor concreta nº 1. *Alembic:* framework a mais para ~60 linhas de runner. |
-| Infra GCP | **Projeto novo por ambiente** (`ap-optin-homolog` agora, `ap-optin-prod` depois), região `southamerica-east1`, provisionado por runbook `gcloud` executado via CLI (§10) | *Reaproveitar `registradora-506000`:* descartado — o recomeço inclui a infra, separada do projeto antigo. *Um projeto para homolog+prod:* mistura credenciais reais da CERC com as de homolog. *Terraform:* nenhum irmão usa; YAGNI para 1 projeto e meia dúzia de recursos. |
+| Infra GCP | **Projeto por ambiente** (`brikz-ap` para homolog, já criado e vazio; prod em projeto próprio depois), região `southamerica-east1`, provisionado por runbook `gcloud` executado via CLI (§10) | *Reaproveitar `registradora-506000`:* descartado — o recomeço inclui a infra, separada do projeto antigo. *Um projeto para homolog+prod:* mistura credenciais reais da CERC com as de homolog. *Terraform:* nenhum irmão usa; YAGNI para 1 projeto e meia dúzia de recursos. |
 | Garantia de isolamento | **Estrutural, em runtime** (`tenant_info` validado por `get_db`) | *Disciplina no `.env`/Secret Manager (estado anterior):* causou incidente real — dois tenants no mesmo banco, suíte de testes apagou opt-ins reais. |
 | Testes | **Postgres local** (PostgreSQL 17 instalado; Docker opcional), mesmo runner de migrations | *Cloud SQL real do tenant de dev (estado anterior):* lento, custa, e foi o vetor do incidente acima. |
 
@@ -217,7 +217,7 @@ Segue o molde dos irmãos (`etl-back-elegibility/cloudbuild.yaml`): infra criada
 
 ### 10.1 Projeto e região
 
-- Projeto **`ap-optin-homolog`** (prod: `ap-optin-prod`, mesma receita), separado do `registradora-506000` antigo.
+- Projeto **`brikz-ap`** (já existente, vazio: org `456240596788`, billing `01BF2A-2DCFEA-505336`, conta `ricardo@brikz.ai`), separado do `registradora-506000` antigo. Prod: projeto separado, nome definido quando a CERC liberar produção; mesma receita.
 - Região **`southamerica-east1`** (São Paulo): CERC e financiadores no Brasil; dado de EC no país evita discussão de residência de dados com financiador exigente. ~15–20% mais caro que `us-east1` — irrelevante nesta escala.
 - APIs: `run`, `sqladmin`, `secretmanager`, `cloudbuild`, `artifactregistry`, `iam`.
 
@@ -248,16 +248,18 @@ Tudo que é por tenant é lido **em runtime** pela API do Secret Manager (`GOOGL
 
 - **Service `optin-service`**: ingress público (o front chama do navegador; auth é o JWT), `--service-account optin-run@`, 1 CPU / 512 Mi, concurrency 20, min 0 / max 3 (homolog), timeout 60 s. Env não sensível: `ENVIRONMENT=homolog`, `GOOGLE_CLOUD_PROJECT`, `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`, `IAM_JWT_ISSUER`, `CERC_AUTH_URL`, `CERC_API_BASE_URL`. Segredos via `--set-secrets` (§10.3). Sem `--add-cloudsql-instances` — o Connector não usa o socket Unix.
 - **Job `migrate-tenants`**: mesma imagem e SA, comando `python manage.py migrate_tenants`, 1 tarefa, sem retry (migration não é idempotente por acidente).
-- **Job `provisionar-tenant`**: idem, comando `python manage.py provisionar_tenant`, `<cnpj>` passado em `--args` na execução (`gcloud run jobs execute provisionar-tenant --args=<cnpj> --wait`).
+- **Job `optin-manage`**: idem, genérico para comandos administrativos — args padrão `manage.py check`, sobrescritos na execução (`gcloud run jobs execute optin-manage --args=manage.py,provisionar_tenant,<cnpj> --wait`; idem para `seed_dominio_arranjo`).
+- Ambos os jobs são criados/atualizados pelo próprio `cloudbuild.yaml` (`gcloud run jobs deploy` é create-or-update), sem bootstrap manual.
+- Pré-requisitos de código para o primeiro deploy: `DEBUG` só quando `ENVIRONMENT=development` (hoje tudo que não é `production` vira debug — homolog ficaria com CORS de localhost e stack traces); `.dockerignore` (hoje `COPY . .` levaria `.env`, `.git` e `.claude/` para a imagem); gunicorn com `--workers ${WEB_CONCURRENCY:-2}` (1 CPU / 512 Mi não comporta 4).
 
 ### 10.6 `cloudbuild.yaml` (ordem obrigatória)
 
-1. `docker build` + `push` com tag `$SHORT_SHA`.
-2. `gcloud run jobs update migrate-tenants --image <nova>` (o job aponta para a imagem nova, que contém as migrations novas).
+1. `docker build` + `push` com tag `_TAG` (= `git rev-parse --short HEAD`, passado no submit; `SHORT_SHA` só é preenchido por trigger).
+2. `gcloud run jobs deploy migrate-tenants --image <nova>` e `gcloud run jobs deploy optin-manage --image <nova>` (os jobs apontam para a imagem nova, que contém as migrations novas).
 3. `gcloud run jobs execute migrate-tenants --wait` — **falhou, o build para aqui**; a revisão antiga continua servindo.
 4. `gcloud run deploy optin-service --image <nova>`.
 
-Substituições: `_REGION`, `_SERVICE`, `_RUNTIME_SA`, `_CORS_ALLOWED_ORIGINS`, `_CERC_AUTH_URL`, `_CERC_API_BASE_URL`. Deploy é `gcloud builds submit --config cloudbuild.yaml` manual (trigger por push fica de fora, §8).
+Substituições: `_TAG`, `_REGION`, `_SERVICE`, `_RUNTIME_SA`, `_ENVIRONMENT`, `_CORS_ALLOWED_ORIGINS`, `_CERC_AUTH_URL`, `_CERC_API_BASE_URL`. O build roda como `optin-build@` (`serviceAccount:` no yaml). Deploy é `gcloud builds submit --config cloudbuild.yaml --substitutions=_TAG=$(git rev-parse --short HEAD)` manual (trigger por push fica de fora, §8).
 
 ### 10.7 Primeiro deploy (ordem no runbook)
 
