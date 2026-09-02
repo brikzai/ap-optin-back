@@ -13,11 +13,15 @@ class Command(BaseCommand):
         parser.add_argument("--dry-run", action="store_true")
 
     def handle(self, *args, **opts):
-        ids = [opts["tenant"]] if opts["tenant"] else registry.tenant_ids()
+        try:
+            ids = [opts["tenant"]] if opts["tenant"] else registry.tenant_ids()
+        except registry.RegistroTenantsInvalido as e:
+            raise CommandError(str(e))
+
         falhas = []
         for cnpj in ids:
-            nome = registry.nome_banco(cnpj)
             try:
+                nome = registry.nome_banco(cnpj)
                 config = get_tenant_config(cnpj)
                 registry.validar_config(cnpj, config)
                 engine = _create_engine(config)
@@ -28,7 +32,7 @@ class Command(BaseCommand):
                     engine.dispose()
             except Exception as e:  # um tenant não pode impedir os outros
                 falhas.append(cnpj)
-                self.stderr.write(f"[migrate] {nome}: ERRO {e}")
+                self.stderr.write(f"[migrate] {cnpj}: ERRO {e}")
                 continue
             verbo = "seria aplicada" if opts["dry_run"] else "aplicada"
             for a in aplicadas:
