@@ -44,6 +44,9 @@ def test_provisionar_depois_migrate_e_seed(monkeypatch):
     call_command("seed_dominio_arranjo", "--tenant", CNPJ, stdout=StringIO())  # idempotente
     db = cloudsql_client_module.get_db(CNPJ)
     assert db.table("dominio_arranjo").select("codigo").eq("codigo", "99T").execute().data == [{"codigo": "99T"}]
+    # 99T (curinga interno) + os 47 códigos oficiais da CERC.
+    assert db.table("dominio_arranjo").select("codigo", count="exact").execute().count == 48
+    assert db.table("dominio_arranjo").select("codigo").eq("codigo", "VCC").execute().data == [{"codigo": "VCC"}]
 
 
 def test_provisionar_duas_vezes_falha_sem_existente():
