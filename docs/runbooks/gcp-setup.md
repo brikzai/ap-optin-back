@@ -122,6 +122,31 @@ qualquer `gcloud builds submit`:**
 - **Importante** (não é código, é o próprio Cloud SQL): `ssl_mode` estava `ALLOW_UNENCRYPTED_AND_ENCRYPTED`.
   Corrigido para `ENCRYPTED_ONLY` (seção 2 acima).
 
+## 5b. Deploy automático (Cloud Build trigger)
+
+Desde 2026-09-03 o código-fonte foi para `github.com/brikzai/ap-optin-back` (remote pessoal
+`rdelimasilva/ap-optin` descartado) e existe um trigger que builda/deploya sozinho a cada push na `master` —
+o `gcloud builds submit` manual da seção 5 continua funcionando, mas deixa de ser o caminho normal.
+
+    gcloud builds connections describe optin-github --region=southamerica-east1   # estado da conexão GitHub
+    gcloud builds triggers describe optin-deploy-master --region=southamerica-east1
+
+- **Conexão:** `optin-github` (2ª geração), autorizada via OAuth como usuário `brikzai`, GitHub App instalado
+  no repositório `ap-optin-back`.
+- **Repositório cadastrado:** `optin-back` → `https://github.com/brikzai/ap-optin-back.git`.
+- **Trigger:** `optin-deploy-master`, branch `^master$`, config `cloudbuild.yaml` do próprio repo,
+  substituição `_TAG=$SHORT_SHA` (equivalente ao `$(git rev-parse --short HEAD)` manual), service account
+  `optin-build@brikz-ap.iam.gserviceaccount.com` (mesma da seção 3).
+- **Aprovação:** nenhuma (`approvalConfig: {}`) — decisão explícita, sem gate manual antes de
+  `migrate-tenants` rodar em homolog. Qualquer push na `master` vai para o ar sozinho.
+- **Pré-requisito que faltava e foi resolvido:** a service agent do Cloud Build
+  (`service-1009092036032@gcp-sa-cloudbuild.iam.gserviceaccount.com`) precisou de `roles/secretmanager.admin`
+  no projeto para a conexão GitHub conseguir guardar o token OAuth — sem isso a criação da connection falha
+  com `permission_denied` em `secretmanager.secrets.create`.
+
+Acompanhar builds disparados pelo trigger: `gcloud builds list --region=southamerica-east1 --limit=5` ou
+Console → Cloud Build → History.
+
 ## 6. Onboarding de tenant
 
 Um tenant = uma entrada em `TENANT_IDS` + um segredo `TENANT_<cnpj>_CONFIG` + um banco `ap_<cnpj>`.

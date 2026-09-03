@@ -2,8 +2,11 @@
 # Ordem obrigatória: build → push → jobs apontando para a imagem nova →
 # migrate-tenants (falhou = para aqui, revisão antiga segue no ar) → deploy do service.
 #
-# Uso (manual, sem trigger):
+# Uso manual (fora do trigger):
 #   gcloud builds submit --config cloudbuild.yaml --substitutions=_TAG=$(git rev-parse --short HEAD)
+#
+# Também roda automático: trigger "optin-deploy-master" a cada push na master de
+# github.com/brikzai/ap-optin-back, sem aprovação manual (docs/runbooks/gcp-setup.md seção 5b).
 #
 # Pré-requisitos: docs/runbooks/gcp-setup.md seções 1–4 e os segredos do(s) tenant(s) (seção 6).
 steps:
